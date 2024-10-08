@@ -1,0 +1,2834 @@
+---
+title: "CITS4009 - Project 2"
+author: "Aadil Ali VAGH (22791631), Nicodemus ONG (22607943)"
+date: "22 OCTOBER 2023"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  markdown:
+    wrap: sentence
+---
+
+# Introduction
+
+The goal of this Machine Learning project is to train a Decision Tree Model and a K-Nearest Neighbours Algorithm to predict whether a soccer player from the football simulation FIFA-21 is broadly of binary types: `Attacking` or `Defensive`.
+
+The dataset is of all players in FIFA21 and has been scraped from the site SoFIFA.com.
+The dataset can be found here: <https://www.kaggle.com/datasets/yagunnersya/fifa-21-messy-raw-dataset-for-cleaning-exploring>
+
+#### Shiny Dashboard {#shiny-dashboard}
+
+This file also contains an interactive shiny dashboard at the end.
+Please run the first few chunks before using it.
+
+[5. Shiny App:]
+
+Video Explanation of dashboard: <https://youtu.be/tlGLk1NIcFU>
+
+# Section 1: Data Preperation
+
+## 1.1 Load required libraries
+
+```{r, message=FALSE}
+library(ggplot2)
+library(cluster)
+library(gridExtra)
+library(DataExplorer)
+library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(gganimate)
+library(gapminder)
+library(transformr)
+library(ggExtra)
+library(shiny)
+library(shinyWidgets)
+library(FSelector)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(glmnet)
+library(pROC)
+library(kableExtra)
+library(knitr)
+library(lime)
+library(cvms)
+library(ROCit)
+library(pander)
+library(ROCR)
+library(class)
+library(reshape2)
+library(broom)
+library(dynamicTreeCut)
+library(factoextra)
+library(fpc)
+library(ggridges)
+
+data <- 'fifa21_raw_data.csv'
+
+df <- read.csv(data, header = T, na.strings=c("","NA"))
+```
+
+## 1.2 ETL
+
+### 1.2.1 Glancing at Data
+
+```{r}
+str(df)
+```
+
+There are 18979 rows with 77 columns/variables.
+At a glance there is some messy data in the columns 'Position', 'Team...Contract', 'Wage' etc. that will require some form of transformation to make them useful for us in this analysis.
+
+## 1.3 Data Extraction
+
+### 1.3.1 Extracting Team names and contract end dates
+
+The `Team...Contract` column seems to be a concatenation of the players' Club Names and their contract periods.
+We need their Club name and year of contract expiry if we want to do any sort of drill through of the data going forward.
+We will attempt to use regex.
+
+```{r, out.lines = 100}
+
+df$Club <- (str_extract(df$Team...Contract, "[[a-zA-Z0-9] ]+"))
+df$ContractExpiry <- str_extract(df$Team...Contract, "(?<=~ )[^\\n]+")
+
+head(sort(unique(df$Club)),100)
+```
+
+Some of the club names are appearing incorrectly, especially those with special characters, such as accents in the names, lets try to use POSIX instead.
+Some of the country names have a leading white-space, we will also strip this.
+
+```{r}
+
+df$Club <- str_trim(str_extract(df$Team...Contract, "[[:alnum:]. ]+"))
+
+head(sort(unique(df$Club)),100)
+
+```
+
+We now have usable Club Names and contract expiry years.
+We still need to convert our value and wage columns to numeric from `chr`.
+We will attempt by creating a function called symbols to zeroes, which will convert the mathematical symbols such such as `M` and `K` to the corresponding number of zeroes.
+Please note, that although it may look strange, many German clubs are actually named '1.
+...'.
+
+## 1.4 Conversion of data
+
+### 1.4.1 Conversion to numeric
+
+```{r}
+
+symbols_to_zeroes <- function(value){
+  
+  value <- gsub("€", '', value)
+  
+  if (grepl("M$", value)){
+    return (as.numeric(gsub('M', 'e6', value)))}
+  else if (grepl("K$", value)){
+    return (as.numeric(gsub('K', 'e3', value)))}
+  else return (as.numeric(value))}
+
+df$Value <- sapply(df$Value, symbols_to_zeroes)
+
+df$Release.Clause <- sapply(df$Release.Clause, symbols_to_zeroes)
+
+class(df$Value)
+```
+
+Our value figures are now usable as well.
+But the wage figures are still in an unusable format.
+Let's try a different method of cleaning using functions from the stringr library.
+
+```{r}
+
+df$Wage = str_remove_all(df$Wage, "€")
+df$Wage = str_replace_all(df$Wage,"K", "000")
+df$Wage = as.numeric(df$Wage)
+
+class(df$Wage)
+
+```
+
+Great, this is now sorted too.
+Finally we need to extract only the first position from the multiple that each player has in the Positions column.
+The first one is generally considered to be the preferred position.
+
+### 1.4.2 Extracting best position
+
+```{r}
+df$Positions = sapply(str_split(df$Positions," "), '[', 1)
+
+(unique(df$Positions))
+```
+
+### 1.4.3 Clean dates
+
+```{r}
+library(lubridate)
+
+df$Joined <- year(mdy(df$Joined))
+```
+
+# Section 2: Classification
+
+## Summary
+
+1.  Target Variable The central objective of this project is to classify FIFA players into two categories: *"Attacking"* and *"Defending"*.
+    The target variable, *"Player Type",* is a binary outcome, where *"Attacking"* is represented as 1, and *"Defending"* as 0.
+    This classification aims to categorize players based on their style of play and position within a football team.
+
+2.  Feature Selection For feature selection, we employed a combination of domain knowledge and feature importance analysis.
+    We initially considered a wide range of player attributes, including playing position, offensive and defensive statistics, physical attributes, and historical performance data.
+    Utilizing techniques such as correlation analysis, mutual information, and recursive feature elimination, we curated a subset of relevant features that significantly contribute to classifying players into attacking or defending roles.
+    This meticulous process ensures that our model leverages the most informative attributes for accurate classification.
+
+3.  Classifier To construct our predictive model, we explored various classification algorithms, including *Decision Trees, Random Forest, Support Vector Machines, K Nearest Neighbor and Neural Networks.* After thorough research and evaluation, we selected the *Decision Tree* and *K Nearest Neighbor* classifier as our final models due to its exceptional performance in terms of accuracy and interpretability.
+    Hyperparameter tuning was conducted to optimize both models for achieving the best possible classification performance.
+
+4.  Results Discussion Upon training and evaluating the results, we achieved promising results.
+    The models exhibited a high accuracy rate, approximately \>90%, on the test dataset, demonstrating its capability to accurately classify players as either attacking or defending.
+    A detailed analysis of feature importance revealed that attributes such as Interception and aggresion metrics were the most influential factors in determining player types.
+
+5.  Evaluation of Models To comprehensively assess our model's performance, we employed a range of evaluation metrics, including precision, recall, F1-score, and ROC AUC. Furthermore, we implemented cross-validation to ensure the model's robustness and mitigate overfitting.
+    Our results consistently indicated that the decision tree classifier outperformed KNN across multiple evaluation metrics but only by a small margin.
+    We also compared our model's performance to a baseline model and observed a significant improvement, underscoring the value of our predictive approach in accurately categorizing players into their respective roles on the football field.
+
+In summary, this section revolves around the classification of FIFA players into attacking and defending categories, employing a meticulously selected set of player attributes and a Decision Tree/KNN classifier that delivered robust results.
+The evaluation metrics and insights derived from the model's performance offer valuable guidance for football teams in optimizing their player strategies and formations.
+
+## 2.1 Target variable
+
+Before we begin with our prediction models, we first have to further transform our data.
+in our project, we have decided that our target variable shall be whether or not a player is a defender or an attacker.
+By deciding this we have chosen to determine this based on a players position as well as their attacking rating.
+These 2 combinations give us a clear result as to whether a player is defending or attacking.
+
+### 2.1.1 Creating Defensive/Attacking Players for binary dependent variable creation.
+
+```{r}
+defensive_players_vector <- c("LB", "LWB", "RB", "RWB", "CB", "CDM")
+attacking_players_vector <- c("LM", "RM", "CAM", "CDM", "RW", "ST", "LW", "CF")
+
+# Calculate the median defending value for CM players
+median_defending <- median(df[df$Positions == "CM", "Defending"])
+
+
+# Initial transformation for non-CM positions
+df %<>% mutate(
+  PositionType = case_when(
+    Positions %in% defensive_players_vector ~ "Defensive Player",
+    Positions %in% attacking_players_vector ~ "Attacking Player",
+    Positions == "GK" ~ "Goalkeeper",
+    TRUE ~ NA_character_
+  )
+)
+
+# Transformation for CM players based on Defending median value
+df %<>% mutate(
+  PositionType = case_when(
+    Positions == "CM" & Defending >= median_defending ~ "Defensive Player",
+    Positions == "CM" & Defending < median_defending ~ "Attacking Player",
+    TRUE ~ PositionType
+  )
+)
+
+# Get target variable
+table(df$PositionType)
+```
+
+#### 2.1.2 Remove keepers from data set
+
+A goalkeeper holds a unique position in the team, distinct from other roles, due to certain attributes such as "overhead exit" and "one-on-one duels." Because of these distinctive characteristics, we treat the goalkeeper position separately (Al-Asadi & Tasdemir, 2021).
+Hence we will be removing goalkeeper data from our dataset.
+
+```{r}
+
+df <- df %>% filter(Positions != "GK")
+
+```
+
+#### 2.1.3 Remove unnecessary variables and unique identifiers
+
+In our data preprocessing phase, we made strategic choices regarding feature selection to enhance the quality of our dataset.
+We used the following code to eliminate specific columns from our dataset:
+
+```{r}
+df <- df[, !(names(df) %in% c("Nationality", "ID", "photoUrl", "LongName", "playerUrl", "Team...Contract", "Attacking", "Positions", "Finishing", "Volleys", "FK.Accuracy", "Long.Shots", "Positioning", "Penalties", "Defending", "Marking","Standing.Tackle", "Sliding.Tackle","Goalkeeping", "GK.Diving", "GK.Handling", "GK.Kicking", "GK.Positioning", "GK.Reflexes", "SHO", "DEF", "BOV", "BP", "Name", "Hits", "Loan.Date.End", "Club", "Value", "Wage", "Release.Clause"))]
+```
+
+We removed columns such as *`ID`* and *`LongName`* since they serve as unique identifiers and do not provide meaningful information for our machine learning purposes.
+Additionally, columns like *`photoUrl`,`playerUrl`* and *`Hits`* were dropped as they pertain to website-related information and are unrelated to our predictive task.
+
+Furthermore, we pre-emptively excluded columns directly associated with our dependent variable, *`PlayerTypeBinary`* which classifies players into *`Attacking`* or *`Defensive`* roles.
+This decision was made to prevent data leakage and ensure that our model relies on relevant, non-redundant features for accurate predictions.
+We carefully curated our feature set to enhance the effectiveness of our machine learning model.
+This is based on a table by a journal article titled "A framework of interpretable match results" Yeung, C. C. K et al, 2023).
+
+Following feature selection, we further enhanced the quality of our dataset through data cleaning and column renaming.
+Here's a summary of the steps we took:
+
+[Column Renaming]{.underline}: We used the following code to rename specific columns for better clarity
+
+```{r}
+# Named vector for abbreviation to full form
+rename_vec <- c(
+  "W.F" = "Weak_Foot",
+  "SM" = "Skill_Moves",
+  "A.W" = "Attacking_Work_Rate",
+  "D.W" = "Defensive_Work_Rate",
+  "IR" = "International_Reputation"
+  # Add other abbreviations and their full forms as needed
+)
+
+# Renaming columns
+current_colnames <- colnames(df)
+new_colnames <- ifelse(current_colnames %in% names(rename_vec), rename_vec[current_colnames], current_colnames)
+
+# Replace full stops with underscores and convert to lowercase
+new_colnames <- tolower(gsub("\\.", "_", new_colnames))
+
+# Assign the new column names back to the dataframe
+colnames(df) <- new_colnames
+
+colnames(df) <- c(
+  "age",
+  "overall_rating",
+  "potential",
+  "height",
+  "weight",
+  "foot",
+  "growth",
+  "joined",
+  "crossing",
+  "heading_accuracy",
+  "short_passing",
+  "skill",
+  "dribbling",
+  "curve",
+  "long_passing",
+  "ball_control",
+  "movement",
+  "acceleration",
+  "sprint_speed",
+  "agility",
+  "reactions",
+  "balance",
+  "power",
+  "shot_power",
+  "jumping",
+  "stamina",
+  "strength",
+  "mentality",
+  "aggression",
+  "interceptions",
+  "vision",
+  "composure",
+  "total_stats",
+  "base_stats",
+  "weak_foot",
+  "skill_moves",
+  "attacking_work_rate",
+  "defensive_work_rate",
+  "international_reputation",
+  "summary_pace",
+  "summary_pass",
+  "summary_dribbling",
+  "summary_physical",
+  "contractexpiry",
+  "positiontype"
+)
+df <- df[, !(names(df) %in% c("contractexpiry", "joined"))]
+```
+
+This code snippet helps ensure that column names are consistent, readable, and follow a standardized format.
+
+[Data Cleaning]{.underline}: We conducted data cleaning on several columns to make them suitable for analysis:
+
+We removed *"lbs"* from the *"weight"* column and converted it to numeric values.
+
+```{r}
+# Clean the weight column
+df$weight <- as.numeric(gsub("lbs", "", df$weight))
+```
+
+We converted the *"height"* column from the format *"feet'inches"* to a numeric representation in inches.
+
+```{r}
+# Clean the height column
+feet <- as.numeric(gsub("'.*", "", df$height))
+inches <- as.numeric(gsub(".*'", "", gsub("\"", "", df$height)))
+df$height <- feet * 12 + inches
+```
+
+Columns like *"weak_foot"*, *"skill_moves"*, and *"international_reputation"* had *"★"* symbols, which we removed and converted to integer values for analysis.
+
+```{r}
+df$weak_foot <- as.integer(gsub("★", "", df$weak_foot)) 
+df$skill_moves <- as.integer(gsub("★", "", df$skill_moves)) 
+df$international_reputation <- as.integer(gsub("★", "", df$international_reputation))
+```
+
+we will now see how many attacking and defending players are there in total.
+
+```{r}
+# Create a table of the positiontype column
+position_type_table <- table(df$positiontype)
+
+# Print the count of attacking and defending players
+cat("Number of Attacking Players:", position_type_table["Attacking Player"], "\n")
+cat("Number of Defending Players:", position_type_table["Defensive Player"], "\n")
+```
+
+These preprocessing steps ensured that our dataset is clean, standardized, and ready for subsequent analysis and modeling.
+These efforts contribute to the reliability and accuracy of our predictive model.
+
+## 2.2 Feature Variables
+
+First, we specify the target variable for our machine learning analysis.
+In this case, we've defined *"positiontype"* as the target variable.
+This variable represents the player's position type, which we intend to predict using machine learning techniques.
+
+```{r}
+# Target Variable
+target <- "positiontype"
+```
+
+Next, we identify and categorize the features in our dataset into two main types: categorical and numerical variables.
+
+-   Here's a breakdown of the steps involved:
+
+    1.  We remove the target variable from the dataset to focus solely on feature columns. Using `select_if(is.character)`, we select columns that have a character data type, typically representing categorical variables.
+    2.  `select_if(~!all(is.na(.)))` ensures that we only consider columns with actual data, filtering out columns with all missing (NA) values.
+
+The `names()` function retrieves the names of the selected columns, representing our categorical variables.
+
+```{r, message=FALSE}
+categorical_variables <- df %>%
+  select(-target) %>%
+  select_if(is.character) %>%
+  select_if(~!all(is.na(.))) %>%
+  names()
+```
+
+-   Similar to the categorical variable identification process, this code identifies numerical variables:
+
+    1.  We remove the target variable to focus on feature columns.
+    2.  Using `select_if(is.numeric)`, columns with a numeric data type are selected.
+    3.  `select_if(~!all(is.na(.)))` ensures we consider columns without all missing (NA) values.
+
+The names of the selected columns, representing our numerical features, are stored in the `numerical_variables` variable.
+
+```{r}
+numerical_variables <- df %>%
+  select(-target) %>%
+  select_if(is.numeric) %>%
+  select_if(~!all(is.na(.))) %>%
+  names()
+```
+
+Finally, we print a summary statement to provide an overview of our dataset's structure.
+This statement informs us of the counts of categorical features, numerical features, and the target column, helping us understand the composition of our dataset.
+This information is essential for guiding subsequent feature engineering and modeling decisions.
+
+```{r}
+cat_features_count <- length(categorical_variables)
+num_features_count <- length(numerical_variables)
+target_column_count <- 1
+
+cat(
+  "There are", cat_features_count, "categorical features,",
+  num_features_count, "numerical features,",
+  "and", target_column_count, "target column."
+)
+```
+
+We will also need to convert the position type to binary for easier use in our models later on.
+
+```{r}
+# Define a function to convert "positiontype" to binary
+convertPositionTypeToBinary <- function(df) {
+  df$positiontype <- ifelse(df$positiontype == "Attacking Player", 1, 0)
+  return(df)
+}
+
+# Convert the "positiontype" column to binary
+df <- convertPositionTypeToBinary(df)
+```
+
+## 2.3 Conversion of Numerical to Categorical and Categorical to Numerical Variable
+
+### Function: `convert_numerical_to_categorical`
+
+We begin by defining a custom function called `convert_numerical_to_categorical`.
+This function is designed to convert numerical variables into categorical ones with a specified number of categories.
+
+```{r}
+convert_numerical_to_categorical <- function(input_df, num_categories = 5, columns_to_convert) {
+  # Create a copy of the input dataframe to avoid modifying the original
+  cat_df <- input_df
+
+  # Loop through the specified columns and convert them to categorical
+  for (col_name in columns_to_convert) {
+    cat_df[[paste0(col_name, "_category")]] <- cut(input_df[[col_name]], breaks = num_categories, labels = FALSE)
+  }
+
+  # Remove the original numerical columns
+  cat_df <- cat_df[, -(match(columns_to_convert, names(cat_df)))]
+
+  return(cat_df)
+}
+```
+
+This function takes an input dataframe **`input_df`**, a specified number of categories **`num_categories`**, and a list of column names **`columns_to_convert`**.
+It creates a copy of the input dataframe to avoid modifying the original data.
+It then iterates through the specified columns and converts each of them into categorical variables using the **`cut`** function with the specified number of categories.
+The original numerical columns are removed from the resulting dataframe, and the modified dataframe **`cat_df`** is returned.
+
+We apply this function to our original dataframe **`df`** with the specified number of categories (5) and the list of numerical variables **`numerical_variables`**.
+The resulting dataframe is stored in **`cat_df`**.
+
+```{r}
+cat_df <- convert_numerical_to_categorical(df, num_categories = 5, numerical_variables)
+```
+
+### Function: `convert_categorical_chr_numerical`
+
+Next, we define another custom function called **`convert_categorical_chr_numerical`**.
+This function is designed to convert categorical variables (in character format) into numerical ones.
+
+```{r}
+convert_categorical_chr_numerical <- function(input_df, columns_to_convert) {
+  # Create a copy of the input dataframe to avoid modifying the original
+  num_df <- input_df
+
+  # Loop through the specified columns and convert them to numerical
+  for (col_name in columns_to_convert) {
+    num_df[[paste0(col_name, "_category")]] <- as.numeric(factor(input_df[[col_name]]))
+  }
+
+  # Remove the original categorical columns
+  num_df <- num_df[, -(match(columns_to_convert, names(num_df)))]
+
+  return(num_df)
+}
+```
+
+Similar to the previous function, this one also creates a copy of the input dataframe to avoid altering the original data.
+It iterates through the specified columns and converts them into numerical variables by applying the **`as.numeric(factor(…))`** conversion.
+The original categorical columns are then removed from the resulting dataframe, and the modified dataframe **`num_df`** is returned.
+
+To identify the columns that need to be converted from categorical to numerical, we use the following code:
+
+```{r}
+columns_to_convert <- names(cat_df)[!sapply(cat_df, is.numeric)]
+```
+
+This code selects columns in **`cat_df`** that are not already in numeric format and stores their names in the **`columns_to_convert`** variable.
+
+Finally, we apply the **`convert_categorical_chr_numerical`** function to **`cat_df`** with the **`columns_to_convert`** list, converting the remaining categorical variables into numerical format.
+
+These functions facilitate the conversion of variables between numerical and categorical formats, allowing us to prepare our data for machine learning tasks efficiently.
+
+```{r}
+cat_df <- convert_categorical_chr_numerical(cat_df, columns_to_convert)
+```
+
+## 2.4 Training and Testing data split
+
+Before splitting our dataset into training and testing sets, we start by setting a random seed to ensure reproducibility of our results.
+This random seed will ensure that the same randomization process is applied each time we split the data, making our experiments consistent.
+
+```{r}
+# Set a random seed for reproducibility
+set.seed(4009)
+```
+
+Next, we determine the size of our training set.
+Conventionally, a common practice is to allocate 70% of the data to the training set and the remaining 30% to the testing set.
+We calculate the number of rows needed for the training set based on this percentage.
+
+```{r}
+# Number of rows to include in the training set (70%)
+train_size <- floor(0.7 * nrow(cat_df))
+```
+
+To create our training set, we randomly sample rows from our dataset without replacement.
+We use the sample function to generate random row indices for the training set.
+These indices will determine which rows from our dataset will be included in the training data.
+
+```{r}
+# Generate a random sample of row indices for the training set
+train_indices <- sample(x = 1:nrow(cat_df), size = train_size, replace = FALSE)
+```
+
+With the random indices in hand, we create our training set by selecting the corresponding rows from the original dataset.
+
+```{r}
+# Create the training set
+train_set <- cat_df[train_indices, ]
+```
+
+The testing set is created by excluding the rows used in the training set.
+This ensures that the same data points are not used for both training and testing, which could lead to overfitting.
+
+```{r}
+# Create the testing set by excluding the rows used in the training set
+test_set <- cat_df[-train_indices, ]
+```
+
+Finally, we print the dimensions of both the training and testing sets to provide a clear understanding of the dataset split.
+
+```{r}
+# Print the dimensions of the training and testing sets
+cat("Training set size: ", nrow(train_set), "\n")
+cat("Testing set size: ", nrow(test_set), "\n")
+```
+
+## 2.5 Null Model
+
+A *"null model"* is a fundamental and straightforward reference model that serves as a baseline for comparing the performance of more complex models.
+It is also sometimes called a *"baseline model"* or *"naive model".* The purpose of a null model is to provide a simple and minimalistic way to evaluate the predictive power of more advanced models.
+Here's an in-depth explanation of what a null model is with reference to our FIFA dataset:
+
+### 2.5.1 Definition of a Null Model:
+
+A null model is a basic model that makes predictions or classifications based on a simple criterion or rule.
+It typically does not consider any of the dataset's features or variables but instead relies on a minimalistic approach.
+The null model's predictions are often deterministic or based on the most frequent class in the dataset.
+
+***Baseline for Model Comparison:***
+
+The primary purpose of a null model is to establish a baseline for evaluating the performance of more complex models.
+By comparing the performance of sophisticated models with the null model, we can determine whether the advanced models provide meaningful improvements.
+In essence, it helps answer the question: ["Is the more complex model better at making predictions than a basic, minimal model?"]{.underline}
+
+***Null Model Example for FIFA Dataset:***
+
+In the context of the FIFA dataset, suppose we have a binary classification task, and we want to predict whether a player is an attacker (1) or not (0) based on various player attributes.
+To create a null model for this task, we could use a simple rule, such as always predicting the majority class.
+If the majority of players in the dataset are non-attackers, the null model would predict "0" for every player, regardless of their attributes.
+
+***Performance Evaluation:***
+
+A null model is often associated with poor predictive performance because it does not take into account any features or patterns in the data.
+When we evaluate the performance of a more advanced model, we would expect it to outperform the null model.
+If the advanced model cannot beat the null model, it suggests that the dataset may not contain useful information for making predictions or that the advanced model is not effective.
+
+***Interpreting Results:***
+
+When comparing the performance of our advanced model to the null model multiple scenarios may arise:
+
+If the advanced model performs significantly better than the null model, it indicates that the dataset's features contain valuable information for making predictions.
+If the advanced model performs only marginally better than the null model, it may suggest that the dataset is challenging to predict, or that more advanced modeling techniques are not significantly more effective than a simple baseline.
+If the advanced model performs worse than the null model, it is a clear sign that the modeling approach needs improvement.
+
+```{r}
+calculate_auc <- function(prediction, target) {
+  round(as.numeric(
+    performance(prediction(prediction, target), "auc")@y.values
+  ), 4)
+}
+
+calculate_mse <- function(prediction, target) {
+  prediction <- prediction[prediction > 0 & prediction < 1]
+  mse <- mean((target - prediction)^2)
+  return(round(mse, 2))  # Rounded to two decimal places
+}
+```
+
+A null model serves as a simple and minimalistic baseline for evaluating the performance of more complex models.
+In this context, we compute the null model by calculating the mean of the target variable in the training set:
+
+```{r}
+null_model <- sum(train_set[target]) / nrow(train_set)
+```
+
+This null model represents the baseline prediction where every instance is assigned the same value, which is the mean of the *target* variable in the training set.
+
+Next, we define a function called **`calculate_auc_mse`** for evaluating models and storing their performance metrics in a data frame.
+
+```{r}
+calculate_auc_mse <- function(prediction, name, type) {
+  auc <- calculate_auc(prediction, test_set[target])
+  mse <- calculate_mse(prediction, test_set[, target])
+  print(paste("AUC:", auc))
+  print(paste("MSE:", mse))
+
+  model_evaluations[nrow(model_evaluations) + 1, ] <- c(
+    name,
+    type,
+    auc,
+    mse
+  )
+  assign("model_evaluations", model_evaluations, envir = .GlobalEnv)
+}
+```
+
+The `calculate_auc_mse` function computes both *AUC* and *MSE* for a given prediction.
+It also takes name and type as additional arguments to identify the model and its type.
+The metrics are printed for inspection.
+
+We initialize a data frame called **`model_evaluations`** with the evaluation metrics of the null model:
+
+```{r}
+model_evaluations <- data.frame(
+  Model.Name = "Null Model",
+  Model.Type = "univariate",
+  AUC = calculate_auc(rep(null_model, nrow(test_set)), test_set[target]),
+  MSE = calculate_mse(rep(null_model, nrow(test_set)), test_set[, target])
+)
+kable(model_evaluations)
+```
+
+Here, we compute the *AUC* and *MSE* for the null model and store them in the **`model_evaluations`** data frame.
+
+In summary, a null model in the context of the FIFA dataset is a basic and minimalistic reference model that serves as a baseline for evaluating the performance of more complex models.
+It is an essential tool in model assessment, helping us determine whether advanced models can effectively make predictions and whether the dataset contains useful information for the specific task at hand.
+
+## 2.6 Single Variable Model
+
+we introduce a custom function called `calculateWeightedPrediction`.
+This function is designed for single-variable prediction and takes several arguments to calculate weighted predictions based on the specified criteria.
+
+```{r}
+calculateWeightedPrediction <- function(targetColumn, variableColumn, applyColumn, positiveClass) {
+  positiveClassProportion <- sum(targetColumn == positiveClass) / length(targetColumn)
+  missingValueTable <- table(as.factor(targetColumn[is.na(variableColumn)]))
+  positiveClassWeightedMissing <- (missingValueTable / sum(missingValueTable))[positiveClass]
+  contingencyTable <- table(as.factor(targetColumn), variableColumn)
+  positiveClassWeightedVariable <- (contingencyTable[positiveClass, ] + 1.0e-3 * positiveClassProportion) / (colSums(contingencyTable) + 1.0e-3)
+  prediction <- positiveClassWeightedVariable[applyColumn]
+  prediction[is.na(applyColumn)] <- positiveClassWeightedMissing
+  prediction[is.na(prediction)] <- positiveClassProportion
+  prediction
+}
+```
+
+This function is versatile and can be used for single-variable predictions in scenarios where class proportions and weighted predictions are relevant.
+
+Now, we iterate through each variable (`v`) in the dataset and generate weighted predictions for that variable.
+These predictions are calculated using the custom function `calculateWeightedPrediction`.
+
+```{r}
+for (v in colnames(cat_df)) {
+  pi <- paste('pred', v, sep = '')
+  train_set[, pi] <- calculateWeightedPrediction(train_set[, target], train_set[, v], train_set[, v], 1)  # 1 represents the positive class
+  test_set[, pi] <- calculateWeightedPrediction(train_set[, target], train_set[, v], test_set[, v], 1)  # 1 represents the positive class
+}
+```
+
+We will also need a function to calculate the *AUC* of the variables.
+
+```{r}
+calcAUC <- function(predcol, outcol) {
+  roc_obj <- roc(outcol, predcol)  # Create a ROC curve object
+  auc_value <- auc(roc_obj)  # Calculate the AUC
+  return(auc_value)
+}
+```
+
+```{r}
+for(v in colnames(cat_df)) {
+  pi <- paste('pred', v, sep='')
+  aucTrain <- suppressMessages(calcAUC(train_set[,pi], train_set[,target]))
+  if (aucTrain >= 0.7) {
+    aucCal <- suppressMessages(calcAUC(test_set[,pi], test_set[,target]))
+    print(sprintf(
+      "%s: trainAUC: %4.3f; calibrationAUC: %4.3f",
+      pi, aucTrain, aucCal))
+  }
+}
+```
+
+Note: `suppressMessages` is used to avoid the spam of unwanted messages that may appear in the terminal.
+
+```{r}
+calculateAUCs <- function(vars, data, outcome, num_replications = 100, calibration_prob = 0.1) {
+  results <- data.frame(Variable = character(0), Mean_AUC = numeric(0), SD_AUC = numeric(0))
+  
+  for (var in vars) {
+    aucs <- rep(0, num_replications)
+    
+    for (rep in 1:num_replications) {
+      useForCalRep <- rbinom(n = nrow(data), size = 1, prob = calibration_prob) > 0
+      predRep <- mkPredC(data[!useForCalRep, outcome], data[!useForCalRep, var], data[useForCalRep, var])
+      aucs[rep] <- calcAUC(predRep, data[useForCalRep, outcome])
+    }
+    
+    mean_auc <- mean(aucs)
+    sd_auc <- sd(aucs)
+    
+    result_row <- data.frame(Variable = var, Mean_AUC = mean_auc, SD_AUC = sd_auc)
+    results <- rbind(results, result_row)
+  }
+  
+  return(results)
+}
+```
+
+Here, we introduce another custom function called `calculateAUCStatistics`.
+This function is similar to `calculateAUCs` but incorporates the custom `calculateWeightedPrediction` function.
+
+```{r}
+calculateAUCStatistics <- function(vars, data, outcome, num_replications = 100, calibration_prob = 0.1) {
+  results <- data.frame(Variable = character(0), Mean_AUC = numeric(0), SD_AUC = numeric(0))
+  
+  for (var in vars) {
+    aucs <- rep(0, num_replications)
+    
+    for (rep in 1:num_replications) {
+      useForCalRep <- rbinom(n = nrow(data), size = 1, prob = calibration_prob) > 0
+      predRep <- calculateWeightedPrediction(data[!useForCalRep, outcome], data[!useForCalRep, var], data[useForCalRep, var], 1)
+      aucs[rep] <- suppressMessages(calcAUC(predRep, data[useForCalRep, outcome]))
+    }
+    
+    mean_auc <- mean(aucs)
+    sd_auc <- sd(aucs)
+    
+    result_row <- data.frame(Variable = var, Mean_AUC = mean_auc, SD_AUC = sd_auc)
+    results <- rbind(results, result_row)
+  }
+  
+  return(results)
+}
+```
+
+Finally, we select a list of variables *(vars)* for which we want to calculate *AUC* statistics and apply the `calculateAUCStatistics` function to generate and print the results.
+
+```{r}
+vars <- c("aggression_category", "interceptions_category", "summary_physical_category")
+
+result_df <- calculateAUCStatistics(vars, cat_df, target)
+print(result_df)
+```
+
+These plots are to show the *ROC* of the 2 variables that were selected.
+
+```{r}
+fig1 <- ggplot(test_set) + geom_density(aes(x=aggression_category, color=as.factor(positiontype)))
+fig2 <- ggplot(test_set) + geom_density(aes(x=interceptions_category, color=as.factor(positiontype)))
+fig3 <- ggplot(test_set) + geom_density(aes(x=summary_physical_category, color=as.factor(positiontype)))
+grid.arrange(fig1, fig2, fig3, ncol=1)
+```
+
+***Fig 1: Aggression category***: The red curve *(position type "0")* for aggression shows a bimodel distribution with peaks around categories 2 and 4, indicating that players of this position type are most frequently classified in these two aggression categories.
+In contrast, the teal curve *(position type "1")* has its highest peak at category 3, suggesting that players of this position type predominantly fall into this aggression category.
+Overall, it appears that players of position type "0" are either less aggressive or more aggressive, while players of position type "1" have a more moderate level of aggression.
+
+***Fig 2: Interceptions category***: For interceptions, both the red and teal curves present a bimodel distribution.
+However, their peaks are located at different categories.
+The red curve *(position type "0")* peaks around categories 2 and 4, similar to its aggression distribution.
+On the other hand, the teal curve *(position type "1")* peaks around categories 1 and 3.
+This indicates that players of position type "1" tend to make fewer interceptions or have a moderate level of interceptions, while players of position type "0" either make a low number of interceptions or are highly interceptive.
+
+***Fig 3: Summary Physical category***: In the summary physical category, both curves show a bimodel distribution.
+The red curve *(position type "0")* peaks at categories 2 and 4, consistent with its trends in the previous two categories.
+The teal curve *(position type "1")* peaks sharply at category 3 and has a smaller peak at category 1.
+This suggests that players of position type "1" generally possess a moderate physicality, while those of position type "0" exhibit either lower or higher physical attributes.
+
+In conclusion, the data suggests that position type "0" players tend to exhibit extreme behaviors, either scoring low or high in the given categories.
+In contrast, position type "1" players generally exhibit moderate behaviors, especially in aggression and physicality.
+The distinct patterns between the two position types could provide valuable insights into player roles and responsibilities on the field.
+
+*Note: **Position 0** is a defending player, **position 1** is an attacking player.*
+
+This function is designed to create *ROC* curves for binary classification models by taking predicted scores and actual outcomes as inputs.
+
+```{r}
+roc_plot <- function(predicted_scores, actual_outcomes, plot_obj = NULL, color = "red", label) {
+  roc_object <- roc(response = actual_outcomes, predictor = predicted_scores)
+  
+  roc_data <- data.frame(
+    FPR = 1 - roc_object$specificities,
+    TPR = roc_object$sensitivities
+  )
+
+  if (is.null(plot_obj)) {
+    plot_obj <- ggplot() + 
+      labs(x = "False Positive Rate", y = "True Positive Rate") + 
+      ggtitle("ROC Curve") + 
+      theme_minimal() +
+      geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+                   linetype = "dashed", color = "grey")  # Adds the baseline diagonal line
+  }
+
+  plot_obj <- plot_obj + 
+    geom_line(aes(x = FPR, y = TPR, color = label), data = roc_data, size = 1) 
+
+  return(plot_obj)
+}
+```
+
+**`predicted_scores`**: The predicted scores or probabilities from a binary classification model.
+
+**`actual_outcomes`**: The actual binary outcomes (0 or 1).
+
+Next, we use the `roc_plot` function to create *ROC* curves for two categories: *"Aggression Category"* and *"Interceptions Category".* The *ROC* curves are plotted separately and then combined into a single plot.
+
+```{r, message=FALSE}
+# ROC curves plotting
+p <- roc_plot(test_set$predaggression_category, test_set[, target], color = "red", label = "Aggression Category")
+p <- roc_plot(test_set$predinterceptions_category, test_set[, target], plot_obj = p, color = "blue", label = "Interceptions Category")
+
+# Adding a legend
+p <- p + scale_color_manual(values = c("Aggression Category" = "red", "Interceptions Category" = "blue"))
+
+print(p)
+```
+
+***Aggression Category (Red Curve)***: The curve for the aggression category starts steeply from the origin and extends toward the top-left corner, nearly reaching the point of perfect classification *(True Positive Rate of 1.0 and False Positive Rate of 0.0)*.
+This indicates that the classification model for the aggression category performs considerably well.
+However, it doesn't touch the top-left corner, which means it's not perfect but still good.
+The area under this curve *(AUC)* would likely be high, signifying a strong model performance.
+
+***Interceptions Category (Blue Curve):***: The curve for the interceptions category is somewhat less steep compared to the aggression curve, especially in its early stages.
+This suggests that for lower thresholds, the model has a higher false positive rate when classifying the interceptions category compared to the aggression category.
+As the curve progresses, it moves closer to the top-left corner, indicating better performance at higher thresholds.
+While still demonstrating a decent performance, the interceptions model seems to be slightly less effective than the aggression model based on the *ROC* curve.
+
+Both models show a commendable classification performance as their respective curves are significantly above the diagonal line, which represents random guessing.
+However, the model for the *aggression category* appears to have a slightly superior performance compared to the *interceptions category* model when evaluated using the *ROC* curve.
+
+## 2.7 Decision trees
+
+***Definition of a Decision Tree***: A decision tree is a supervised machine learning algorithm used for both classification and regression tasks.
+It is a tree-like structure where each node represents a feature or attribute, each branch represents a decision or a rule, and each leaf node represents a class label or a numerical value.
+Here's how a decision tree works in the context of our dataset:
+
+***Feature Selection***: The attributes in the dataset, such as `Attacking`,`PAC`, `SHO`, `DRI`, `PAS`, `PHY` and `DEF` serve as potential features for the decision tree.
+These features are used to make decisions about the target variable, which is `PlayerTypeBinary`
+
+***Node Splitting***: The decision tree algorithm starts at the root node, considering all data points in the training set.
+It selects the best feature to split the data into two or more subsets.
+The *"best"* feature is the one that provides the best separation or reduction in uncertainty about the target variable.
+In classification, this reduction in uncertainty is often measured using criteria like Gini impurity or entropy.
+
+***Recursive Process***: The tree-building process is recursive.
+At each internal node, the algorithm selects a feature and a threshold *(e.g., "Attacking \> 75")* to split the data into subsets.
+This process continues for each subset, creating branches and new internal nodes, until a stopping criterion is met.
+Stopping criteria may include a maximum depth for the tree, a minimum number of data points in a leaf node, or a certain level of purity *(e.g., all data points in a leaf belong to the same class)*.
+
+***Leaf Nodes***: Once the tree-building process is complete, the leaf nodes represent the predicted class labels.
+For example, in our dataset, a leaf node may predict that a player is an attacker if the conditions in that branch are met.
+
+***Prediction***: To make a prediction for a new or test data point, the algorithm starts at the root node and follows the branches and decisions until it reaches a leaf node.
+The class label associated with that leaf node is the prediction for the input data point.
+
+***Model Interpretability***: Decision trees are particularly useful because they are interpretable.
+we can visually inspect the tree structure, which shows how decisions are made, and understand the importance of each feature in determining the outcome.
+
+The code below is a clear representation of the above mentioned explanation and breakdown.
+
+### 2.7.1 Feature selection 1 (Chi Square Test)
+
+We will perform a chi-square filter to select relevant features for the classification task.
+The goal is to identify columns that have a significant association with the target variable `positiontype`.
+
+We start by filtering the training dataset **`train_set`** to exclude columns that start with *"pred".* These columns likely represent prediction results from previous steps and are not part of the feature selection process.
+
+Next, we apply the chi-squared filter using the **`chi.squared`** function to evaluate the association between each remaining feature and the target variable **`positiontype`**.
+This helps us identify which features are statistically significant in predicting the target variable.
+
+We will first need a function that evaluates the model and gives us the performance metrics for comparison.
+
+```{r}
+evaluate_model_performance <- function(model, test_data, target_column, positive_class_label, threshold = 0.5) {
+  # Ensure that the target_column exists in the test data
+  if (!(target_column %in% names(test_data))) {
+    stop("The target column does not exist in the test data.")
+  }
+
+  # Separate the features and the actual target values
+  actual_values <- test_data[[target_column]]
+  test_features <- test_data[, names(test_data) != target_column, drop = FALSE]
+
+  # Make predictions (probabilities) using the model
+  predictions_prob <- predict(model, newdata = test_features, type = "prob")
+  
+    # Check if 'positive_class_label' is valid
+  if (!positive_class_label %in% names(predictions_prob)) {
+    # NEW: Add a message to understand what's happening
+    print("Debug: Predicted probabilities column names:")
+    print(names(predictions_prob))  # This will show the actual labels the model predicted
+
+    stop(paste("The specified positive class label:", positive_class_label, 
+               "is not found in the predicted probabilities. Valid labels are:", 
+               paste(names(predictions_prob), collapse = " ")))
+  }
+  
+  # Extract probabilities of the designated positive class
+  positive_probabilities <- predictions_prob[, positive_class_label]
+
+  # Convert probabilities to binary classification based on the threshold
+  predicted_classes <- as.logical(ifelse(positive_probabilities > threshold, TRUE, FALSE))
+
+  # Ensure 'actual_values' are in a boolean format based on the 'positive_class_label'
+  # Convert factors or other types to binary logical to match 'predicted_classes'
+  actual_binary <- as.logical(ifelse(actual_values == positive_class_label, TRUE, FALSE))
+
+  # Create a confusion matrix
+  cm <- confusionMatrix(as.factor(predicted_classes), as.factor(actual_binary))
+
+  # Calculate precision, recall, and F1-score
+  precision <- cm$byClass["Pos Pred Value"]
+  recall <- cm$byClass["Sensitivity"]
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+
+  # Calculate accuracy
+  accuracy <- cm$overall["Accuracy"]
+
+  # Create the ROC curve and calculate AUC
+  roc_obj <- roc(response = actual_binary, predictor = positive_probabilities)
+  auc <- auc(roc_obj)
+
+  # Create the ROC curve plot
+  plot(roc_obj, main = "ROC Curve", col = "blue")
+
+  # Compile the performance metrics into a data frame
+  performance_metrics <- data.frame(
+    Metric = c("Precision", "Recall", "F1-Score", "Accuracy", "AUC"),
+    Value = c(precision, recall, f1_score, accuracy, auc)
+  )
+
+  # Print the performance metrics table
+  print(performance_metrics)
+
+  # Return the performance metrics and confusion matrix for further analysis if needed
+  return(list(
+    Metrics = performance_metrics,
+    ConfusionMatrix = cm$table
+  ))
+}
+
+```
+
+The **`chi_sq_result`** object contains the results of the chi-squared test, including the chi-squared statistic, degrees of freedom, p-value, and attribute importance scores.
+
+```{r}
+# Filter out columns that start with "pred"
+filtered_train_set <- train_set[, !grepl("^pred", names(train_set))]
+
+# Perform chi-square filter
+chi_sq_result <- chi.squared(positiontype ~ ., data = filtered_train_set)
+
+print(chi_sq_result)
+```
+
+We extract the column names and their corresponding importance scores from the **`chi_sq_result`** object and store them in a data frame **`chi_sq_result_df`**.
+
+```{r}
+# Extract column names and their corresponding importance scores
+chi_sq_result_df <- data.frame(
+  ColumnName = rownames(chi_sq_result),
+  ImportanceScore = chi_sq_result$attr_importance
+)
+```
+
+To prioritize the most important features, we order the **`chi_sq_result_df`** data frame by **`ImportanceScore`** in descending order.
+This arranges the features from most to least important.
+
+```{r}
+# Order the dataframe by ImportanceScore in descending order
+ordered_chi_sq_result_df <- chi_sq_result_df[order(chi_sq_result_df$ImportanceScore, decreasing = TRUE), ]
+```
+
+Finally, we use the **`kable`** function to display the ordered feature names and their importance scores in a Markdown-friendly table format.
+
+```{r}
+kable(ordered_chi_sq_result_df, row.names = FALSE, format = "markdown")
+```
+
+The provided table details various attributes (or categories) and their corresponding importance scores.
+These scores presumably depict the significance of each attribute in predicting a certain outcome or target variable:
+
+***Interceptions Category***: Standing prominently with a score of approximately 0.4142, this attribute emerges as the most influential factor among those listed.
+Players' ability to intercept plays appears to be a top predictor for the target variable.
+
+***Aggression Category***: With a substantial score of around 0.3303, aggression ranks as the second most significant attribute.
+It underscores the role of aggression in influencing the target outcome.
+
+***Summary Physical Category***: This captures a broader aspect of players' physical capabilities and is a dominant predictor with a score of about 0.2731.
+
+This next step is to filter and select features that have an importance score of 0.2 and above as we will be using those in our models.
+
+```{r}
+# Filter the results based on ImportanceScore
+filtered_chi_sq_result_df <- chi_sq_result_df[chi_sq_result_df$ImportanceScore >= 0.2, ]
+
+# Order the filtered dataframe by ImportanceScore in descending order
+ordered_filtered_chi_sq_result_df <- filtered_chi_sq_result_df[order(filtered_chi_sq_result_df$ImportanceScore, decreasing = TRUE), ]
+
+kable(ordered_filtered_chi_sq_result_df, row.names = FALSE, format = "markdown")
+```
+
+Now we can feed our selected features into our decision tree model
+
+```{r}
+predictors <- paste(ordered_filtered_chi_sq_result_df$ColumnName, collapse = " + ")
+
+# Create the formula
+formula_str <- paste("positiontype ~", predictors)
+
+# Build the decision tree model
+decision_model <- rpart(as.formula(formula_str), data = train_set, method = "class")
+
+# Visualize the decision tree using rpart.plot
+rpart.plot(decision_model, type = 4, extra = 1)
+```
+
+Here's an analysis of the depicted decision tree:
+
+***Root Node (Interceptions Category)***: The tree starts by evaluating the `interceptions_category`.
+If the value is greater than or equal to 3, it moves to the left branch.
+Otherwise, it follows the right branch where all the data points are categorized into a single group (6270 of class 0 and 5562 of class 1).
+
+***Second Level (Interceptions Category Again)***: For data points with `interceptions_category` greater than or equal to 3, the tree further assesses this attribute.
+If it's greater than or equal to 4, the tree moves to the leftmost terminal node, classifying the data into 6258 of class 0 and 1740 of class 1.
+For those with a value less than 4, the decision-making process proceeds to the vision_category.
+
+***Third Level (Vision Category)***: When `vision_category` is less than 3, the data points are grouped into the next terminal node with 1536 in class 0 and 1342 in class 1.
+For data points where the `vision_category` is greater than or equal to 3, the tree evaluates the `skill_moves_category`.
+
+***Fourth Level (Skill Moves Category)***: If `skill_moves_category` is less than 2, the decision-making then goes to the `aggression_category`.
+For values greater than or equal to 2, the tree classifies the data into 175 of class 0 and 889 of class 1.
+
+***Fifth Level (Aggression Category)***: For the data points where the `skill_moves_category` is less than 2, if the `aggression_category` is greater than or equal to 3, the tree moves to a terminal node with 473 data points in class 0 and 340 in class 1.
+If it's less than 3, it branches out further, resulting in the next terminal nodes: 4722 of class 0 and 398 of class 1 on the left and 32 of class 0 and 89 of class 1 on the right.
+
+In summary, the decision tree makes classifications based primarily on the `interceptions_category`.
+If this value is less than 3, the model quickly classifies without needing further decisions.
+For higher values, the tree evaluates a combination of attributes: *vision, skill moves,* and *aggression* to make its final classifications.
+It provides a structured way of navigating through the various attributes and their thresholds to make informed decisions or predictions.
+
+To measure performance of our model, we have opted to use *Accuracy, Precision, Recall, Specificity, F1_Score, AUC* and a *Confusion Matrix*.
+A *Density Plot* is also used to show the probability of our model.
+
+```{r}
+model_performance <- function(model, test_data, target_column) {
+  # Predict using the model
+  predicted_classes <- predict(model, newdata = test_data, type = "class")
+  
+  # Predict probabilities for the ROC curve and AUC calculation
+  predicted_probabilities <- predict(model, newdata = test_data, type = "prob")[,2]  # select the second column, which is usually the positive class
+
+  # Actual values
+  actual_classes <- test_data[[target_column]]
+
+  # Generate the confusion matrix
+  cm <- confusionMatrix(as.factor(predicted_classes), as.factor(actual_classes))
+
+  # Basic metrics
+  accuracy <- cm$overall["Accuracy"]
+  precision <- cm$byClass["Pos Pred Value"]
+  recall <- cm$byClass["Sensitivity"]
+  specificity <- cm$byClass["Specificity"]
+  f1_score <- 2 * (precision * recall) / (precision + recall)  # F1 Score calculation
+
+  # Calculate AUC
+  roc_result <- suppressMessages(roc(response = as.numeric(as.character(actual_classes)), predictor = as.numeric(predicted_probabilities)))
+  auc <- auc(roc_result)
+
+  # Prepare the results in a data frame for better printing
+  results_df <- data.frame(
+    Metric = c("Accuracy", "Precision", "Recall", "Specificity", "F1_Score", "AUC"),
+    Value = c(accuracy, precision, recall, specificity, f1_score, auc)
+  )
+
+  # Use pander to create a nice markdown table
+  cat("Model Performance Metrics:\n")
+  pander(results_df, style = "rmarkdown", split.tables = Inf)
+
+  cat("\nConfusion Matrix:\n")
+  pander(cm$table, style = "rmarkdown", split.tables = Inf)
+
+  # Plotting the density plot
+  pred_df <- data.frame(
+    Probability = predicted_probabilities,
+    Actual = as.factor(actual_classes)  # Ensure this is a factor
+  )
+  
+  double_density_plot <- ggplot(pred_df, aes(x=Probability, fill=Actual)) +
+                        geom_density(aes(group=Actual), alpha=0.5) +
+                        labs(title="Decision Tree Predicted Probability Density", x="Probability", y="Density", fill="Actual Class")
+  
+  print(double_density_plot)
+
+  return(list(
+    Metrics = results_df,
+    ConfusionMatrix = cm$table,
+    ROC = roc_result,
+    DensityPlot = double_density_plot
+  ))
+}
+```
+
+```{r}
+decision_tree_results <- model_performance(decision_model, test_set, "positiontype")
+```
+
+***Class 0 (Pink/Red Distribution)***: A large majority of the observations predicted to belong to class 0 have probabilities close to 0, indicating that the model is quite confident in these predictions.
+There's a smaller peak around the 0.5 probability mark, suggesting some uncertainty in a subset of predictions for this class.
+
+***Class 1 (Teal/Blue Distribution)***: Most of the predictions for class 1 are strongly skewed towards a probability of 1, implying that the model is very confident about these classifications.
+However, there's a smaller bump around the 0.5 mark, indicating that there are some observations for which the model is less certain.
+
+***Overlap Area***: The overlap between the two distributions around the 0.5 mark suggests that there's a zone of uncertainty where the model isn't distinctly confident about classifying observations as either 0 or 1.
+
+While it seems to be very sure about many of its predictions (those close to 0 for class 0 and those close to 1 for class 1), there is a region of uncertainty around the 0.5 probability mark.
+This area of overlap might be of particular interest when evaluating and potentially improving the model, as it represents cases where the model might be more prone to making errors.
+
+## 2.8 K-Nearest Neighbor
+
+***Definition of k-Nearest Neighbors (KNN)***: K-Nearest Neighbors (KNN) is a non-parametric method used for classification and regression in supervised learning scenarios.
+Unlike decision trees, which construct a hierarchy of decision nodes, the KNN algorithm operates by simply observing the k-nearest data points (neighbors) to the target sample and deducing the classification from their attributes.
+
+In the context of our FIFA dataset, where each player is characterized by attributes like `Attacking, PAC, SHO, DRI, PAS, PHY,and DEF` KNN is used to predict a player's type (Attacking or Defensive) from the variable `PlayerTypeBinary` and is based on how similar players are classified in the dataset.
+Here's how KNN works in this context:
+
+***Feature Selection***: Just like in decision trees, KNN considers the attributes of the players as features in a multi-dimensional feature space.
+Each feature represents a dimension, and each player represents a point in this space.
+
+***Distance Calculation***: The key concept in KNN is the notion of 'distance' between points (players) in this feature space.
+When we want to classify a new player, KNN calculates the distance between this player and all others in the training dataset.
+Common distance measures include Euclidean, Manhattan, or Minkowski distances.
+
+***Selecting Neighbors***: The 'k' in KNN is a user-defined constant representing how many of the nearest neighbors the algorithm considers when making a prediction.
+After calculating all distances, the algorithm sorts the players based on distance and selects the 'k' closest players.
+
+***Majority Voting or Averaging***: In a classification task, each of the k-neighbors casts a 'vote' for their class, and the class with the most votes is the final classification for the new player.
+In the case of regression, the average output of the k-neighbors is the final prediction for the new player.
+
+***Prediction***: The new player is assigned a class label (or a continuous outcome in the case of regression) based on the majority vote or average from its k-nearest neighbors.
+This prediction method is very direct, as it relies purely on the data's inherent distribution and doesn't require any model fitting.
+
+***Parameter Sensitivity***: The choice of 'k' and the type of distance metric significantly influence KNN's performance.
+A small value of 'k' makes the algorithm sensitive to noise and outliers, while a large 'k' makes it computationally expensive and might include distant, less relevant points.
+
+***Model Interpretability***: While KNN is straightforward and often effective with a suitable number of neighbors, it doesn't provide explicit insight into the importance of each feature.
+The algorithm simply considers distances in a multi-dimensional space, making it less interpretable regarding which features are more influential in the decision process.
+
+KNN is simple to to use and implement and is effective in situations where there is low noise and data clusters naturally into similar classes.
+However, it often suffers from computational complexity, especially with large datasets.
+It is also prone to degradation due to high dimensionality of data.
+
+We will first need to normalize the values for our KNN model.
+
+```{r}
+# Normalize the data
+normalization_values <- preProcess(train_set, method = c("center", "scale"))
+
+# Apply transformation
+train_set_normalized <- predict(normalization_values, train_set)
+test_set_normalized <- predict(normalization_values, test_set)
+```
+
+Once normalised, we will than need to set the predictors from our `selected_features` variable.
+
+```{r}
+
+target_column <- "positiontype"
+
+
+selected_features <- filtered_chi_sq_result_df$ColumnName
+
+
+selected_features <- setdiff(selected_features, target_column)
+
+# Check if all selected features are present in the dataset
+missing_features <- setdiff(selected_features, names(train_set_normalized))
+if(length(missing_features) > 0) {
+  stop("The following selected features are not present in the training set: ", 
+       paste(missing_features, collapse = ", "))
+}
+
+# Extract the appropriate predictors based on the selected features
+train_predictors <- train_set_normalized[, selected_features]
+test_predictors <- test_set_normalized[, selected_features]
+
+# Extract the target variable from the training set
+train_response <- train_set_normalized[[target_column]]
+```
+
+Now we will perform the KNN algorithm with a k of 10
+
+```{r}
+# Perform KNN. The 'k' value should be chosen based on cross-validation or another appropriate method.
+k <- 10  # for example, but should be validated
+
+# Train the KNN model
+knn_model <- knn(train = train_predictors, 
+                 test = test_predictors, 
+                 cl = train_response, 
+                 k = k)
+
+```
+
+We will need a function to measure the performance of the model, it differs from the decision tree as KNN does not have a prediction metric hence we need a seperate function for it.
+
+```{r}
+model_performance_knn <- function(predicted_classes, test_data, target_column) {
+  
+  # No need to predict again, as we already have the predicted classes from KNN
+  
+  # Actual values
+  actual_classes <- test_data[[target_column]]
+
+  # Generate the confusion matrix
+  cm <- confusionMatrix(as.factor(predicted_classes), as.factor(actual_classes))
+
+  # Basic metrics
+  accuracy <- cm$overall["Accuracy"]
+  precision <- cm$byClass["Pos Pred Value"]
+  recall <- cm$byClass["Sensitivity"]
+  specificity <- cm$byClass["Specificity"]
+  f1_score <- 2 * (precision * recall) / (precision + recall)  # F1 Score calculation
+  
+  # Prepare the results in a data frame for better printing
+  results_df <- data.frame(
+    Metric = c("Accuracy", "Precision", "Recall", "Specificity", "F1_Score"),
+    Value = c(accuracy, precision, recall, specificity, f1_score)
+  )
+
+  # Use pander to create a nice markdown table
+  cat("Model Performance Metrics:\n")
+  pander(results_df, style = "rmarkdown", split.tables = Inf)
+
+  cat("\nConfusion Matrix:\n")
+  pander(cm$table, style = "rmarkdown", split.tables = Inf)
+  
+  # Visualization of the confusion matrix outcomes
+  conf_matrix_values <- c(cm$table[1], cm$table[2], cm$table[3], cm$table[4])
+  names(conf_matrix_values) <- c("True Negative", "False Positive", "False Negative", "True Positive")
+
+  # Create a data frame for plotting
+  plot_data <- data.frame(
+    Category = names(conf_matrix_values),
+    Count = conf_matrix_values
+  )
+
+  # Create a bar chart
+  bar_chart <- ggplot(plot_data, aes(x = Category, y = Count, fill = Category)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Confusion Matrix Overview", x = "Outcome", y = "Count") +
+    theme_minimal()
+
+  print(bar_chart)
+
+  # Return results for further processing
+  return(list(
+    Metrics = results_df,
+    ConfusionMatrix = cm$table
+  ))
+}
+
+```
+
+```{r}
+knn_results <- model_performance_knn(knn_model, test_set_normalized, "positiontype")
+```
+
+It's evident that the highest number of outcomes fall under the *"True Negative"* and *"True Positive"* categories, indicating that the classifier correctly identified a significant number of instances.
+Specifically, the True Negative count is slightly higher than the True Positive count, suggesting a more prominent accuracy in correctly identifying negatives.
+On the other hand, the *"False Positive"* count is relatively low, implying that there were fewer instances where the classifier mistakenly identified a negative case as positive.
+The *"False Negative"* category has the lowest count, indicating that there were even fewer instances where the classifier missclassified a positive case as negative.
+
+Overall, the classifier exhibits commendable performance, especially in accurately discerning Defensive players.
+The relatively low counts of false positives and false negatives further attest to its efficacy.
+When supplemented with additional metrics such as precision, recall, and the F1 score---derived from the confusion matrix values---it offers a holistic evaluation of the model's effectiveness.
+
+## 2.9 Feature Selection 2 (Literature Review):
+
+The goal of this literature review is to identify the features that have been selected for similar machine learning tasks, as well to identify any gaps and special considerations that may be applicable to this project and finally to justify our usage of specific features in our model.
+The FIFA player dataset from sofifa.com has been use widely for various football related machine learning tasks.
+The unique aspect of this dataset is that EA Sports (developers of the FIFA video-game series) use scouts and professional methods to rank and apply skill ratings to players whereas other sources of player information like TransferMarkt are crowd-sourced and so may not be as accurate (Behravan & Razavi, 2021).
+
+|                   |                                       |                                              |                     |                                    |                          |                        |
+|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
+| **Reference No.** | **Dataset Used**                      | **Feature Selection Method**                 | **No. of Features** | **Features relevant to our model** | **Positions Classified** | **Salary / Wag Pred.** |
+| 1                 | FIFA 18                               | Chi-Squared, Correlation + more              | 9 - 12              | 8                                  | 9                        | No                     |
+| 2                 | FIFA16                                | Relief attribute evaluation                  | 10                  | 4                                  | \-                       | Yes                    |
+| 3                 | FIFA 21 (combined with score results) | Multiple                                     | 21                  | 6                                  | 2                        | No                     |
+| 4                 | FIFA 15                               | Gain                                         | 43                  | 5                                  | 4                        | No                     |
+| 5                 | FIFA 20                               | Pearson Correlation + ANOVA                  | 9                   | 4                                  | \-                       | Yes                    |
+| 6                 | FIFA 20                               | Clustering                                   | 22                  | 9                                  | 4                        | Yes                    |
+| 7                 | FIFA11                                | Hand Picked                                  | 28                  | 5                                  | 3                        | No                     |
+| 8                 | Real Players Data                     | Selected by coaches of Iranian football club | 19                  | 3                                  | 4                        | No                     |
+
+### 2.9.1 Review of Selected Studies:
+
+#### **2.9.1.1 1) Empirical Comparisons for Combining Balancing and Feature Selection Strategies for Characterizing Football Players Using FIFA Video Game System** **Objective**:
+
+The aim of the study is to improve positional characterisation of football players using machine learning while addressing challenges such as class imbalance and dimensionality.
+
+***Results***: Using a combined approach of feature selection and ROS & SMOTE resampling techniques provided higher prediction accuracy in comparison to single use techniques
+
+***Feature importance***: Multiple methods such as correlation, chi-squared, LASSO, mRMR etc, were used.
+When compared to the features available for use in our dataset the following stood out:
+
+`Interceptions` - 4 methods
+
+`Long passing` - 4 methods
+
+`Dribbling` - 3 methods
+
+`Vision` - 2 methods
+
+`Acceleration, Agility, Aggression, Balance` -- 1 method
+
+***Insights:*** We can prioritise features such as interceptions, long passing and dribbling as they have selected by multiple methods and are available within our dataset.
+
+#### **2.9.1.2** 2) **Computational Estimation of Football Player Wages**
+
+***Objective***: Primary goal of the study is to provide a numerical estimation of wages of football players, with the model being trained on data from FIFA 16.
+
+***Results***: The model used in the study provided a Pearson correlation of 0.77, indicating that it was fairly effective in predicting wages, considering the fact that it was only provided with on-field and player skills stats and other influential stats such as popularity and social media following were not included.
+
+***Feature selection and importance***: The relief attribute evaluation method was used to determine which features were highly influential and we will cross-reference with our dataset to see which ones we can use.
+These are: `Reactions, Ball Control, Interceptions, Long Passing and Vision.`
+
+#### **2.9.1.3** 3) Sports Analytics for Football League Table and Player Performance Prediction
+
+***Objective***: This article addresses 2 parts predicting a league table and how to identify top 'defenders'.
+It provides methodologies on how to approach both, but we will be focussing on the 'defender' identification aspect.
+The dataset used a hybrid data of match statistics and FIFA player data but then partitioned the FIFA player stats to be used separately.
+
+***Results***: The features were selected using multiple-linear regression with backward elimination.
+There was no multi-collinearity and the model had high r-squared values.
+This indicates that the features used were indeed effective and useful for predicting the dependant variable.
+
+***Feature selection***: The features selected in the article aren't mentioned explicitly for the partitioned FIFA dataset, instead a mixture of top features has been provided from which we can use the following: `Reactions, Ball Control, Interceptions, Long Passing and Vision.`
+
+#### **2.9.1.4** 4) A Gaussian mixture clustering model for characterizing football players using the EA Sports' FIFA video game system
+
+***Objective***: This study uses Gaussian mixture clustering model to categorise players into 4 main positions.
+The dataset used is filtered to contain only players from European leagues.
+
+***Results***: The feature selection is done using Principal Component Analysis to reduce the number of correlated variables but continue to capture as much information from the original variables (Kabacoff, 2011).
+After the clustering the most influential feature identified using Gain was 'Dribbling' with a value of 0.6.
+The other features were all \<= 0.2.
+
+***Feature selection***: `Dribbling` was the only highly influential feature, hence we will consider this for our model.
+
+#### **2.9.1.5** 5) Predict the Value of Football Players Using FIFA Video Game Data and Machine Learning Techniques
+
+***Objective***: The study introduces a quantitative method to be able to predict the value of player's value that may be helpful for clubs and players during real -world transfer negotiations.
+The data is from FIFA 20.
+
+***Feature Selection***:
+
+-   ***Initial Analysis:***
+
+    -   ***Methodology***: Pearson Correlation Coefficient was used to examine the interdependence b/w the features.
+
+    -   ***Heuristic Base***: The features are highly correlated with the dependent variable but not with each other
+
+    -   ***Findings***: The stat features 'shooting', 'passing' and 'dribbling' were strongly interrelated but poorly related to the dependant variable, hence only 'passing' was used.
+
+***Statistical Significance of features***:
+
+-   ***Linear Regression***: The features selected then once again had their significance checked using linear regression.
+    Using ANOVA: Age, Potential, Height and International Reputation were deemed statistically significant.
+    Whereas, weak foot and passing were considered not significant.
+    Indicating they didn't have much explanatory power.
+
+-   ***Decision Tree Analysis***: The importance of features were ranked based on the number of times they appeared in the decision tree splits.
+    The key variables here were Age, Potential, Height and International Reputation but with the addition of Passing in the context of Random Forest models.
+
+-   ***Relevant features***: Out of these features `Passing, Age, Height and International Reputation` may be applicable for usage in our model.
+
+#### **2.9.1.6** 6) A Novel Machine Learning Method for Estimating Football Players' Value in the Transfer Market
+
+***Objective***: This study proposes a new method of estimating football player's value using data from FIFA, as opposed to TransferMarkt.
+It employs clustering players by position and then using a hybrid regression model to predict wage.
+
+***Feature selection***: The study uses Particle Swarm Optimisation for feature selection and Support Vector Regression for parameter tuning.
+The Attackers and Defenders clusters had separate feature selection.
+The top relevant features from the attackers cluster: Age, Height, Weight, Preferred Foot, Weak Foot, Long passing.
+The top relevant features from the defenders cluster: `Age, Height, Weight, International Reputation, Weak foot`
+
+#### **2.9.1.7** 7) Identification of players' positions in a multi-agent game using artificial neural networks and C4.5 algorithm: A comparative study
+
+***Objective***: The study focussed on predicting player's positions from FIFA11 and used 28 attributes
+
+***Feature Selection***: This study seems to have skipped the feature selection part and only focussed on implementation without much heed to see the explanatory power of the variables.
+They hand picked 28 variables of which the following are relevant to our modelling: `Dribbling, Interceptions, Long Pass, Acceleration, Aggression`
+
+#### **2.9.1.8** 8) A fuzzy inference system with application to player selection and team formation in multi-player sports
+
+**Objective**: The study uses a structured approach to select players for a soccer team.
+It uses a combination of features very similar to those available in a FIFA dataset although the stats are based on real players from an Iranian football club.
+
+**Feature selection**: The features were hand-picked by the coaches of the club and used regularly for team selection purposes.
+The relevant features are: `Height, Long passing and Dribbling`
+
+#### **2.9.1.9** **Discussion**:
+
+The use of FIFA player datasets for categorising, analysing and predicting values of soccer players, in recent years has been growing in popularity due to the robust nature of the data collection and aggregation by the creators of the game EA Sports.
+This in stark contrast to other popular data sources such as TransferMarkt that uses crowd-sourced information to build its dataset (Behravan & Razavi, 2021).
+
+As mentioned in the introduction, this literature review, aims to extract the common feature selection themes across 8 peer-reviewed studies and identify their relevance to our machine learning project.
+A common theme across the studies has been the repeated selection of the variables Interceptions, Long Passing, Dribbling, Acceleration and Vision.
+While many of the variables identified proved to be significant in the context of positional categorisation or valuation, their importance is varying.
+According to Valero, 2017, Dribbling is by the far the most influential attribute in differentiating players by position whereas according to Al-Asadi & Tasdemir, 2022, dribbling was not statistically significant in terms of its influence to the dependant variable, value.
+
+This suggests that there is indeed some amount of contextual difference when it comes to feature selection for FIFA players and that the dependent variable does change the features that are relevant.
+We can see that the studies that used value as a dependent variable included \`Weight', 'Height' and 'Age', whereas these variables were missing from the studies that used the dependent variable as 'Position'.\
+This variability of relevant features changing with the dependent variable, is not one that has been discussed in any of studies and we also weren't successful in finding any studies that discussed this topic, hence this may be considered a 'research gap'.
+
+Feature selection also varied vastly among the studies.
+Some used statistical measures such as Pearson Correlation (Asadi & Tasdemir, 2022), while others employed machine learning techniques such as Particle Swarm Optimisation (Behravan & Razavi, 2021).
+Not all studies used sophisticated feature selection methods however, Obiedat et.
+al, 2013 and Tavana et.
+al 2013, instead leveraged domain knowledge with the formed hand picking the features they felt were the most appropriate and the latter using the knowledge of real football coaches.
+Another important observation was that some features that would seem irrelevant in the real-world context such as Shooting being an important stat for identifying defenders seemed to have some significance in predictive models (Asadi & Tasdemir, 2022).
+
+Lastly, while the FIFA dataset and its methodically derived attributes proves useful in the context of machine learning driven positional prediction, it is still important to note that in the real-world other factors that are not captured in the dataset such as a player's current form, tactical changes in the team, injuries to other players and even just the manager's preference can significantly change the position of a player on the field.
+
+#### Summary of Frequently Selected Features:
+
+From the literature, the following features frequently appeared across multiple studies:
+
+`1) Interceptions`
+
+`2) Dribbling`
+
+`3) Long Passing`
+
+`4) Vision`
+
+`5) Ball Control`
+
+`6) Acceleration`
+
+`7) Agility`
+
+`8) Aggression`
+
+In conclusion, the features extracted from the literature review will be useful in building a second set of options for our model.
+They offer substantial insights from prior research and also underscore the importance of using a tailored feature selection approach for our own model.
+They do also reflect similarities in terms of features selected from our own selection methods of Chi-Square and Pearson Correlation.
+
+First, we input the features that we have identified.
+
+```{r}
+# literature review
+literature_review = c("interceptions_category",
+                      "dribbling_category",
+                      "long_passing_category",
+                      "vision_category",
+                      "ball_control_category",
+                      "acceleration_category",
+                      "agility_category",
+                      "aggression_category"
+                      )
+```
+
+than we feed those features into our decision tree model.
+
+```{r}
+# Create a string of predictors separated by ' + '
+predictors <- paste(literature_review, collapse = " + ")
+
+# Create the formula
+formula_str <- paste("positiontype ~", predictors)
+
+# Build the decision tree model
+decision_model_lr <- rpart(as.formula(formula_str), data = train_set, method = "class")
+
+# Visualize the decision tree
+rpart.plot(decision_model, type = 4, extra = 1)
+
+decision_tree_results_lr <- model_performance(decision_model_lr, test_set, "positiontype")
+```
+
+Next, we feed them into our K-Nearest Neighbor model.
+
+```{r}
+
+target_column <- "positiontype"
+
+
+selected_features <- literature_review
+
+# Ensure the target variable is not in our predictors.
+selected_features <- setdiff(selected_features, target_column)
+
+# Check if all selected features are present in the dataset
+missing_features <- setdiff(selected_features, names(train_set_normalized))
+if(length(missing_features) > 0) {
+  stop("The following selected features are not present in the training set: ", 
+       paste(missing_features, collapse = ", "))
+}
+
+# Extract the appropriate predictors based on the selected features
+train_predictors_lr <- train_set_normalized[, selected_features]
+test_predictors_lr <- test_set_normalized[, selected_features]
+
+# Extract the target variable from the training set
+train_response_lr <- train_set_normalized[[target_column]]
+```
+
+```{r}
+# Perform KNN. The 'k' value should be chosen based on cross-validation or another appropriate method.
+k <- 10  # for example, but should be validated
+
+# Train the KNN model
+knn_model_lr <- knn(train = train_predictors_lr, 
+                 test = test_predictors_lr, 
+                 cl = train_response_lr, 
+                 k = k)
+
+```
+
+```{r}
+knn_results_lr <- model_performance_knn(knn_model_lr, test_set_normalized, "positiontype")
+```
+
+## 2.10 Comparison of Feature Selection Techniques
+
+To compare our results, we will first plot them into bar charts for better visualization
+
+```{r}
+plot_performance_comparison <- function(decision_tree_metrics, knn_metrics, type) {
+
+
+  # Combine the data frames
+  metrics_dt <- cbind(decision_tree_metrics, Model = "Decision Tree")
+  metrics_knn <- cbind(knn_metrics, Model = "KNN")
+  all_metrics <- rbind(metrics_dt, metrics_knn)
+  
+  # Plotting
+  comparison_plot <- ggplot(all_metrics, aes(x = Metric, y = Value, fill = Model)) +
+    geom_bar(stat = "identity", position = position_dodge(0.9), width = 0.7) +
+    scale_fill_brewer(palette = "Set2", name = "Model") +
+    geom_text(aes(label = sprintf("%.2f", Value)), vjust = -0.5, color = "black", 
+              position = position_dodge(0.9), size = 4) +
+    theme_minimal() +
+    theme(
+      legend.title = element_blank(),
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+    labs(title = paste(type, "Performance Comparison"), y = "Metric Value") +
+    ylim(0, 1)
+  
+  print(comparison_plot)
+}
+
+plot_performance_comparison(decision_tree_results$Metrics, knn_results$Metrics, "Chi Square Test")
+
+plot_performance_comparison(decision_tree_results_lr$Metrics, knn_results$Metrics, "Literature Review")
+```
+
+### 2.10.1 Chi Square Test Feature selection comparison:
+
+Across the board, the Decision Tree generally exhibits marginally superior performance to KNN in all metrics except for AUC, where the KNN slightly outperforms the Decision Tree with a score of 0.96 to 0.91.
+
+Starting with accuracy, both models perform commendably, with the Decision Tree achieving 0.91 and the KNN close behind at 0.91 as well.
+In the context of the F1-Score, which balances precision and recall, the Decision Tree also edges out with a score of 0.92 compared to KNN's 0.91.
+Precision, a measure of how many correctly predicted positive observations come from the total predicted positives, shows a discernible gap between the two models, with the Decision Tree at 0.88 and KNN trailing at 0.88.
+
+The recall metric, which gauges how many actual positives our model captures, displays a tie between the two at 0.88.
+Specificity, another crucial metric which looks at the true negative rate, shows the Decision Tree at 0.86, while KNN lags slightly at 0.87.
+
+In summation, while both the Decision Tree and KNN models show commendable performance across the assessed metrics, the Decision Tree marginally outperforms KNN in most categories.
+The only exception being AUC, where KNN has the upper hand.
+The choice between the two would likely hinge on the specific context and requirements of a given application, especially considering the close competition between their performances.
+
+### 2.10.2 Literature review feature selection comparision:
+
+based on various metrics derived from a literature review.
+Overall, the results exhibit neck-to-neck competition between the two models with only marginal variations in their performance metrics.
+
+Delving into specifics, both models show an identical accuracy score of 0.91, suggesting that their overall prediction correctness is closely matched.
+In terms of the AUC (Area Under Curve) metric, which measures the model's ability to distinguish between classes, the KNN slightly leads with a score of 0.95 compared to the Decision Tree's 0.91.
+For the F1-Score, which provides a balance between precision and recall, both models are again on par, boasting a score of 0.91.
+
+Precision, indicating the proportion of positive identifications that were indeed correct, reveals a modest lead for the Decision Tree at 0.93, with KNN trailing slightly at 0.88.
+Conversely, when considering Recall, which quantifies the proportion of actual positives correctly identified, KNN regains the lead with a score of 0.94 compared to the Decision Tree's 0.89.
+Finally, in the specificity metric, which gauges the true negative rate, the Decision Tree marginally outperforms KNN with a score of 0.93 against KNN's 0.87.
+
+In summary, the Decision Tree and KNN models showcase robust performances, each excelling in different metrics.
+While the Decision Tree slightly edges out KNN in terms of precision and specificity, KNN shines brighter in the AUC and recall metrics.
+Given the marginal differences, the optimal choice between them would be contingent upon the specific objectives and requirements of a project or application.
+
+### 2.10.3 Comparison between the Chi Square Test and Literature Review
+
+Across both contexts, the Decision Tree and KNN models exhibit closely matched performances, often with marginal differences in their metrics.
+Consistently, KNN has demonstrated a superior ability to distinguish between classes, as reflected in the AUC metric, across both datasets.
+Conversely, the Decision Tree tends to be slightly more precise in its predictions, especially evident in the literature review context.
+Recall metrics varied, with KNN taking the lead in the literature review, while both were on par in the Chi Square test.
+Specificity metrics were more fluctuating, with each model outperforming the other in one context.
+
+In conclusion, both models have their strengths and exhibit robust performances across different datasets.
+The choice between the two would necessitate a deeper understanding of the context, objectives, and the specific trade-offs one is willing to make between different performance metrics.
+
+We will use a heat map to visualize the confusion matrix better.
+
+we first have to tidy the data frame by converting our confusion matrix into a dataframe.
+
+```{r}
+# Convert confusion matrix to tidy data frame
+confusion_to_df <- function(matrix, model_name) {
+  df <- as.data.frame(tidy(as.table(matrix)))
+  colnames(df) <- c("Actual", "Predicted", "Freq")
+  df$Model <- model_name
+  return(df)
+}
+```
+
+next we will need to rename the categories as they are represented as a normalized form.
+
+```{r}
+# Update the row and column names of the confusion matrices
+rename_categories <- function(matrix) {
+  colnames(matrix)[colnames(matrix) == "1.06169537345133" | colnames(matrix) == "1"] <- "attacking"
+  colnames(matrix)[colnames(matrix) != "attacking"] <- "defending"
+  rownames(matrix)[rownames(matrix) == "1.06169537345133" | rownames(matrix) == "1"] <- "attacking"
+  rownames(matrix)[rownames(matrix) != "attacking"] <- "defending"
+  return(matrix)
+}
+
+decision_tree_results$ConfusionMatrix <- rename_categories(decision_tree_results$ConfusionMatrix)
+knn_results$ConfusionMatrix <- rename_categories(knn_results$ConfusionMatrix)
+
+decision_tree_results_lr$ConfusionMatrix <- rename_categories(decision_tree_results_lr$ConfusionMatrix)
+knn_results_lr$ConfusionMatrix <- rename_categories(knn_results_lr$ConfusionMatrix)
+```
+
+```{r}
+# Convert confusion matrix to dataframe
+confusion_to_df <- function(matrix, model_name) {
+  df <- as.data.frame(as.table(matrix))
+  df$Model <- model_name
+  return(df)
+}
+
+# Function to display confusion matrices as heatmaps
+display_confusion_matrices <- function(decision_tree_confusion_matrix, knn_confusion_matrix, type) {
+  
+  dt_df <- confusion_to_df(decision_tree_confusion_matrix, "Decision Tree")
+  knn_df <- confusion_to_df(knn_confusion_matrix, "KNN")
+  
+  all_data <- rbind(dt_df, knn_df)
+  
+  ggplot(data = all_data, aes(x = Prediction, y = Reference)) +
+    geom_tile(aes(fill = Freq), color = "white") +
+    geom_text(aes(label = sprintf("%d", Freq)), vjust = 1) +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    theme_minimal() +
+    labs(title = paste(type, "Confusion Matrices"), x = "Predicted", y = "Actual", fill = "Frequency") +
+    facet_wrap(~ Model, ncol = 1)
+}
+
+
+display_confusion_matrices(decision_tree_results$ConfusionMatrix, knn_results$ConfusionMatrix, "Chi Square Test")
+
+display_confusion_matrices(decision_tree_results_lr$ConfusionMatrix, knn_results_lr$ConfusionMatrix, "Literature Review")
+```
+
+***Chi Square Test Confusion Matrices***: In the Chi Square Test data, the Decision Tree algorithm demonstrated a notable proficiency in predicting the 'defending' category but faced difficulties accurately predicting the 'attacking' category.
+Specifically, it had a high number of false negatives, indicating a large number of 'attacking' instances incorrectly classified as 'defending'.
+On the other hand, the KNN algorithm exhibited a comparable pattern, with a slightly better ability to correctly classify 'attacking'.
+Both models showed a high true negative rate, implying they were apt at correctly identifying 'defending' instances.
+
+***Literature Review Confusion Matrices***: For the Literature Review data, the Decision Tree algorithm's struggles persisted, especially with the 'attacking' class, and its performance in predicting the 'defending' class also diminished slightly compared to the Chi Square Test data.
+The KNN algorithm, however, displayed a more balanced performance between the two categories.
+Despite both models encountering challenges in predicting the 'attacking' category, the KNN showed a marginally superior true positive rate, indicating a slightly better capability in correctly predicting 'attacking' instances.
+
+***Comparison***: When comparing the two datasets, it's evident that both the Decision Tree and KNN algorithms grapple with the accurate prediction of the 'attacking' class across the board.
+However, the KNN model exhibits a modestly better overall performance, especially evident in the Literature Review data.
+The Decision Tree's capability to predict the 'defending' class was stronger in the Chi Square Test data than in the Literature Review data.
+Meanwhile, the KNN algorithm remained relatively consistent across both datasets but showcased a minor improvement in its true positive rate for the Literature Review data.
+In summary, while the KNN seems to edge out the Decision Tree in terms of performance, both models could benefit from further refinement to enhance their predictive accuracy.
+
+# 3. Clustering
+
+Clustering offers a strategic lens through which to analyze intricate player data, uncovering hidden patterns that aren't immediately apparent through standard statistical methods.
+Our dataset encompasses a wide range of player attributes, from physical traits like height and weight to skill components such as dribbling, shot power, and agility.
+Implementing clustering algorithms will enable us to identify naturally occurring groupings within this multi-dimensional space, essentially revealing the 'archetypes' of players.
+
+For instance, through clustering, we might discover a cluster characterized by high scores in 'crossing,' 'short_passing,' and 'curve'- attributes indicative of skilled players adept in creating scoring opportunities.
+Conversely, another cluster might emerge with high 'strength,' 'aggression,' and 'heading_accuracy,' suggesting a different archetype, perhaps robust defenders or attackers proficient in aerial duels.
+
+Furthermore, clustering can illuminate nuanced relationships between non-obvious attributes.
+For example, a cluster characterized by players with high 'balance' and 'dribbling' might reveal an archetype of players who excel in maintaining control of the ball in tight spaces, contributing significantly to their teams' offensive maneuvers even if they aren't the primary goal-scorers.
+
+These insights are invaluable for team management and talent scouts who rely on comprehensive player profiles to make informed decisions.
+Identifying such clusters helps in recognizing the inherent strengths and potential niches for players, facilitating targeted talent acquisition, and strategic game planning.
+By understanding the different player archetypes, managers can devise complementary team structures that balance various player strengths, potentially unlocking new strategic and tactical approaches to the game.
+
+Moreover, the dataset's 'growth' feature might reveal players with high potential for improvement, assisting teams in focusing their training resources or scouting for promising talents who could be pivotal for a team's future success.
+Additionally, attributes like 'attacking_work_rate' and 'defensive_work_rate' could help in forming clusters that differentiate players based on their work ethic and style of play, further adding depth to the profiling of players for tactical deployment.
+
+## 3.1 Hierarchical Clustering
+
+the data frame **`df`** undergoes transformation where categorical variables **`attacking_work_rate`** and **`defensive_work_rate`** are converted into integer representations using factorization.
+Additionally, another variable **`dfsfoot`** is created by converting the **`foot`** variable from the dataframe into an integer form.
+These transformations are essential for preparing categorical data for clustering algorithms that work best with numerical values.
+
+```{r}
+# One-hot encoding categorical variables
+df <- within(df, {
+  attacking_work_rate <- as.integer(factor(attacking_work_rate))
+  defensive_work_rate <- as.integer(factor(defensive_work_rate))
+})
+
+df$foot <- as.integer(factor(df$foot))
+
+```
+
+For the purpose of clustering, only numeric columns from the dataframe **`df`** are selected and stored in **`df_for_clustering`**.
+Any rows with missing values (NAs) in this dataframe are omitted to ensure the clustering algorithm receives clean data.
+Post this, the data is standardized by scaling, which means adjusting the data to have a mean of 0 and a standard deviation of 1.
+This step is crucial, as clustering algorithms, like hierarchical clustering, are sensitive to the scale of the data.
+
+```{r}
+# Selecting only the numeric columns for clustering
+df_for_clustering <- df[, sapply(df, is.numeric)]
+
+# Removing rows with NA values
+df_for_clustering <- na.omit(df_for_clustering)
+
+# Scaling the data so that mean = 0 and standard deviation = 1
+df_scaled <- scale(df_for_clustering)
+
+```
+
+A distance matrix, **`dist_matrix`**, is computed for the scaled data using the Euclidean distance method.
+This matrix captures the pairwise distance between every pair of data points.
+Following this, hierarchical clustering is performed on this distance matrix using the **`ward.D2`** method, which aims to minimize the total within-cluster variance.
+Other methods like "single" and "complete" can also be used, but in this code, the Ward's method is chosen.
+
+```{r}
+# Compute the distance matrix
+dist_matrix <- dist(df_scaled, method = "euclidean")
+
+# Perform hierarchical clustering 
+hc <- hclust(dist_matrix, method = "ward.D2") # ward.D2 is one method, there are others like "single", "complete", etc.
+```
+
+The hierarchical clustering result is visualized using a dendrogram, a tree-like diagram that showcases the arrangement of the clusters.
+The parameter **`hang = -1`** ensures that all branches in the dendrogram extend to the bottom.
+Based on the visual inspection of the dendrogram or other criteria, the optimal number of clusters **`k`** is chosen as 5.
+
+```{r}
+# Plot the dendrogram
+plot(hc, hang = -1, labels = FALSE) # 'hang = -1' ensures all branches extend to the bottom
+
+# Choose a number of clusters
+k <- 5
+
+rect.hclust(hc, k = k, border = "red")  
+```
+
+Lastly, to visually emphasize the chosen clusters on the dendrogram, rectangles are drawn around the branches corresponding to the five clusters using the **`rect.hclust`** function.
+The chosen color for these rectangles is red, but this can be customized.
+
+### 3.1.1 Optimal number of clusters
+
+-   To determine the optimal number of clusters for our dataset, we will be using 2 algorithms to assist us in this:
+    1.  Elbow method
+    2.  Silhoutte method
+
+### 3.1.1.1 Elbow Method
+
+The "elbow method" is a technique used in determining the optimal number of clusters for a dataset in K-means clustering.
+Essentially, it involves running the K-means clustering algorithm multiple times over a loop, with an increasing number of clusters (k), and then measuring the variation within the clusters.
+The goal is to ascertain the value of k where the reduction in variation slows down, forming an "elbow" in the graph.
+
+-   ***Variation Measurement (Within-Cluster Sum of Squares)***: The first step in K-means clustering involves assigning each point in our dataset to the nearest cluster centroid, and then adjusting the centroid based on the mean of the points in the cluster.
+    This process minimizes the within-cluster sum of squares (WCSS) - essentially, the total squared variation between each point and the mean of its cluster.
+    Lower values of WCSS are better as they indicate that the data points are closer to the centroids of their respective clusters.
+
+-   ***Running the Algorithm for Different k Values***: We would run the K-means algorithm several times, each time using a different number of clusters (k), and calculate the WCSS for each.
+    Typically, as the number of clusters increases, the WCSS value will decrease because the data points are closer to their respective centroids.
+    However, after a certain point, the decrease in WCSS becomes marginal.
+
+-   ***Identifying the Elbow Point***: When we plot these WCSS values against the number of clusters, the curve usually starts steep and then slowly bends at a point, forming an "elbow." The x-coordinate of this "elbow" (i.e., the number of clusters) is typically considered the optimal number of clusters for our dataset.
+    This is because, at this point, adding more clusters doesn't provide much better fitting to the data, hence it's not worth increasing the complexity of our model.
+
+The purpose of the elbow method is to find a balance between two goals: minimizing the within-cluster variation (which tends to make the clusters as compact as possible) and minimizing the number of clusters (to prevent overfitting and excessive complexity in the model).
+Too many clusters can lead to overfitting, where our model might become too tailored to our training data and perform poorly on new, unseen data.
+Conversely, too few clusters could lead to underfitting, where our model is overly simplistic and doesn't capture the underlying patterns in the data.
+
+```{r, message=FALSE}
+# Calculate the total within-cluster sum of square
+wss <- sapply(1:10, function(k) {
+  kmeans(df, centers = k, nstart = 50)$tot.withinss
+})
+
+# Plot the total within-cluster sum of square against number of clusters
+plot(1:10, wss,
+     type = "b",
+     xlab = "Number of Clusters",
+     ylab = "Total within-clusters sum of squares",
+     main = "Elbow Method for Optimal number of clusters")
+
+```
+
+### 3.1.1.2 Silhoutte Method
+
+The silhouette method is an effective means to assess the appropriateness of the clustering in a dataset, offering a cohesive measure to justify the number of clusters used in K-means clustering.
+The technique hinges on the calculation of the silhouette score, which is a measure of how similar an object is to its own cluster compared to other clusters.
+
+-   ***Calculating Silhouette Score***: The silhouette score for each point is calculated using two values: a) The average distance between the point and all other points in the same cluster (cohesion), and b) The average distance between the point and all other points in the nearest cluster that the point is not a part of (separation).
+    The silhouette score for each point is then obtained by subtracting the cohesion from the separation and dividing by the maximum of the two values.
+    The result is a measure of how appropriately the point has been clustered, a value between -1 and 1, where a high value indicates that the object is well matched to its own cluster and poorly matched to neighboring clusters.
+
+-   ***Aggregating Scores***: After calculating the silhouette scores of all points, the average silhouette score of a cluster is computed.
+    The overall average silhouette score of the dataset is the mean of these averages, representing how tightly grouped all the clusters are.
+
+-   ***Determining Optimal Number of Clusters***: To find the optimal number of clusters, the K-means algorithm is run multiple times with different values of k (number of clusters), and the silhouette scores are computed for each clustering.
+    The optimal number of clusters (k) is the one that maximizes the average silhouette score across all objects.
+    This indicates a balance between a compact, cohesive cluster and ensuring the clusters are well separated.
+
+The silhouette method is particularly insightful as it not only advocates for the best clustering but also provides insight into the distance between the resulting clusters.
+Consequently, it helps in validating the consistency within clusters and the definition between clusters, ensuring that the data points are not arbitrarily assigned, thus enhancing the robustness of the clustering model.
+This method allows for the assessment of the quality of the clustering, guiding the selection of the number of clusters that best capture the inherent structure of the data.
+
+```{r, message=FALSE}
+# Calculate silhouette widths for different numbers of clusters
+sil_width <- sapply(2:10, function(k) {
+  si <- silhouette(kmeans(df, centers = k, nstart = 50)$cluster, dist(df))
+  mean(si[, 3])
+})
+
+# Plot average silhouette widths against number of clusters
+plot(2:10, sil_width,
+     type = "b",
+     xlab = "Number of Clusters",
+     ylab = "Average Silhouette Width",
+     main = "Silhouette Method for Optimal number of clusters")
+```
+
+```{r}
+# Plot the dendrogram
+plot(hc, hang = -1, labels = FALSE) # 'hang = -1' ensures all branches extend to the bottom
+
+# Choose a number of clusters
+k <- 4
+
+# Draw rectangles around the branches
+rect.hclust(hc, k = k, border = "red")  
+```
+
+## 3.2 Validating the clusters
+
+-   To validate the clusters, we will be employing two types of validation methods
+    1.  *PCA*
+    2.  *Stability score*
+
+### 3.2.1 Principal Component Analysis (PCA)
+
+Principal Component Analysis (PCA) is a dimensionality reduction technique that can be used to transform high-dimensional data into a lower-dimensional form.
+When it comes to clustering, PCA can be an effective tool for visualization and validation of clusters in the following ways:
+
+-   ***Visualization of Clusters in Reduced Dimensionality***: When dealing with high-dimensional data, visualizing clusters is challenging.
+    After performing clustering, PCA can be applied to project the data onto the first two or three principal components.
+    This allows for a 2D or 3D visualization where clusters can be plotted to see how well they are separated.
+
+-   ***Validate Cluster Separation***: By visualizing clusters in the first two or three principal components, we can validate how distinct and well-separated the clusters are.
+    If the clusters appear to be well separated in the PCA-transformed space, it provides evidence that the clustering algorithm has effectively partitioned the data.
+
+-   ***Identify Important Features***: PCA can highlight the variance in the data and the features responsible for that variance.
+    By examining the loadings of the principal components, we can identify which original features play significant roles in the separation of clusters.
+    This can provide insights into the underlying structure and meaning of the clusters.
+
+-   ***Noise Reduction***: PCA can help filter out noise by focusing on the components that explain the most variance in the data.
+    This might improve the quality of clusters if PCA-transformed data is used for clustering.
+
+-   ***Validation with Cluster Assignment***: After performing PCA, we can color each point in our scatter plot (2D or 3D) based on its cluster assignment.
+    This provides a visual means to assess how well the clusters are formed.
+    Overlapping colors (clusters) might suggest that certain data points or groups are not distinctly clustered.
+
+-   ***Re-clustering on Reduced Data***: After reducing dimensionality with PCA, we can perform clustering on the transformed dataset and compare the results with clustering on the original data.
+    While this is not a direct validation method, it can offer insights into the stability and robustness of our clustering.
+
+First we need to convert our `df` into a `pca` variable
+
+```{r}
+pca <- prcomp(df_scaled)
+```
+
+To determine how many principal variables to be used, we employ a scree plot and a cumalative variance plot.
+
+```{r}
+# Proportion of variance explained by each component
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+```
+
+we'll generate a scree plot which shows the variance explained by each principal component.
+
+```{r}
+# Scree plot
+plot(var_explained, type = "b", 
+     main = "Scree Plot",
+     xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained")
+```
+
+To get a better understanding of how much total variance is explained by the first n components, we can plot the cumulative variance explained.
+
+By examining the "Cumulative Variance Explained" plot, we can determine the number of components required to explain a certain percentage of the variance
+
+```{r}
+cum_var_explained <- cumsum(var_explained)
+
+plot(cum_var_explained, type = "b",
+     main = "Cumulative Variance Explained",
+     xlab = "Number of Principal Components",
+     ylab = "Cumulative Proportion of Variance Explained")
+abline(h = 0.95, col = "red", lty = 2) # Line for 95% threshold
+
+# Print variance explained by each component
+print(var_explained)
+
+# Print cumulative variance explained
+print(cum_var_explained)
+```
+
+-   ***Scree Plot***: This plot shows the proportion of variance explained by each principal component.
+    From the plot, we observe a steep decline in the variance explained by the first few principal components, and then it levels off.
+    This indicates that the first few components capture a substantial amount of the variability in the data, whereas the subsequent components capture progressively smaller amounts of variance.
+    Typically, we'd want to identify an "elbow" point where the curve starts to level off.
+    In our case, the elbow seems to occur around the 2nd or 3rd component.
+
+-   ***Cumulative Variance Explained***: This plot shows the cumulative proportion of variance explained by the first n components.
+    The red dashed line represents the 95% threshold.
+    Based on this plot, a small number of components (around 6-7) already explain more than 95% of the variance in the data.
+
+-   ***Given the above insights***: The Scree Plot suggests that most of the variance in our dataset is captured by the first few (2-3) components.
+    The Cumulative Variance Explained plot indicates that by using around 6-7 components, we can capture over 95% of the variance in the data.
+
+-   ***Recommendation***: Since our main goal is visualization, then using the first 2 or 3 principal components would be ideal, as they can be easily plotted and visualized in 2D or 3D space.
+
+```{r}
+# Extract the first three principal components for visualization
+pca_data <- data.frame(pca$x[, 1:3])
+```
+
+```{r}
+set.seed(4009) # for reproducibility
+kmeans_result <- kmeans(df_scaled, centers=4)
+clusters <- kmeans_result$cluster 
+
+pca_data$cluster <- clusters
+```
+
+To determine what components were used, we will use loading to identify them and give a better explanation to the clusters.
+
+```{r}
+pca_loading_result <- prcomp(df_scaled[, 1:43], center = TRUE, scale. = TRUE) 
+loadings_matrix <- pca_loading_result$rotation
+loadings_matrix[, 1:3]
+```
+
+This table illustrates how each variable (e.g., age, overall_rating, potential, etc.) contributes to the principal components (PC1, PC2, PC3).
+The values can be interpreted as follows:
+
+-   ***Positive values***: The variable is positively correlated with the respective principal component.
+
+-   ***Negative values***: The variable is negatively correlated with the respective principal component.
+
+-   ***Close to 0***: The variable doesn't have a strong influence on the respective principal component.
+
+From our table, some notable points could be:
+
+-   ***For PC1***: total_stats and base_stats have the highest negative loadings, suggesting they heavily influence this component in a negative direction.
+
+-   ***For PC2***: strength and summary_physical have the most negative influence, whereas acceleration and balance seem to have the most positive influence.
+
+-   ***For PC3***: sprint_speed and summary_pace have the most positive influence, whereas vision has the most negative influence.
+
+```{r}
+ggplot(pca_data, aes(x = PC1, y = PC2, color = as.factor(cluster))) +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "PCA Cluster Visualization", x = "Principal Component 1", y = "Principal Component 2")
+```
+
+This scatterplot shows the distribution of data points (possibly representing individuals or entities) in the first two principal components (PC1 and PC2).
+These components are linear combinations of the original variables that maximize the variance and reduce dimensionality.
+
+The colors represent different clusters, obtained from a clustering algorithm (K-means).
+The clusters group data points based on their similarity:
+
+Cluster 1 (Red): These data points have high values in PC2 and negative values in PC1.
+Cluster 2 (Green): These data points are concentrated around the center but with negative values in both PC1 and PC2.
+Cluster 3 (Blue): These data points have high values in PC1 and are relatively centralized in PC2.
+Cluster 4 (Purple): These data points have high positive values in both PC1 and PC2.
+
+### 3.2.2 Stability Validation
+
+The method clusterboot is being used to assess the stability of clustering results.
+Cluster stability validation is a technique to determine how robust the clustering results are to perturbations in the data.
+The idea is to resample the data multiple times (usually by bootstrapping), cluster each resampled dataset, and then assess the similarity of these clusterings to the original clustering.
+
+```{r}
+clusterboot_hc <- clusterboot(df_scaled, clustermethod = hclustCBI, method = "ward.D2", k = 4)
+```
+
+he stability score for each cluster is given by `1 - clusterboot_hc$bootbrd / 100`.
+
+The closer the stability score is to 1, the more stable the cluster is.
+A score of 1 would indicate perfect stability, meaning that the cluster assignments are consistent across all bootstrap samples.
+Conversely, a score closer to 0 indicates less stability, suggesting that cluster assignments vary significantly across bootstrap samples.
+
+```{r}
+kable(data.frame(Cluster = seq(clusterboot_hc$bootbrd), Stability = 1 - clusterboot_hc$bootbrd / 100))
+```
+
+From the provided table "Cluster Stability", we can interpret the results as:
+
+Cluster 1 has a stability of 0.69, suggesting it's fairly stable.
+Cluster 2 has a stability of 0.55, which is moderate.
+Cluster 3 has a stability of 0.09, indicating it's not very stable and the assignments in this cluster tend to vary a lot across bootstrap samples.
+Cluster 4 has a stability of 0.53, which is also moderate.
+
+## 3.3 Exploring Clusters
+
+to begin our exploration, we first have to append the cluster data as a new column into our df.
+
+```{r}
+# Append the cluster number to the original dataset
+df$cluster <- as.factor(cutree(hc, 4))
+```
+
+### 3.3.1 Distribution of Players across Clusters by Attacking Work Rate
+
+```{r}
+# Ensuring the column is a factor
+df$defensive_work_rate <- factor(df$defensive_work_rate, levels = c(1, 2, 3), labels = c("Low", "Medium", "High"))
+df$attacking_work_rate <- factor(df$attacking_work_rate, levels = c(1, 2, 3), labels = c("Low", "Medium", "High"))
+
+# Plot
+def_plot <- ggplot(df, aes(x = factor(cluster), fill = defensive_work_rate)) +
+  geom_bar() +
+  ggtitle("Distribution of Players across Clusters by Defending Work Rate") +
+  xlab("Cluster") +
+  ylab("Number of Players") +
+  scale_fill_manual(values = c("pink","darkcyan", "darkorange")) +  # Use custom colors
+  theme_minimal() +  # Applying the minimal theme
+  theme(legend.position = "top", 
+        legend.title = element_text(size = 12, face = "bold"),  # Making legend title more prominent
+        legend.text = element_text(size = 10))  # Adjusting legend text size
+
+att_plot <- ggplot(df, aes(x = factor(cluster), fill = attacking_work_rate)) +
+  geom_bar() +
+  ggtitle("Distribution of Players across Clusters by Attacking Work Rate") +
+  xlab("Cluster") +
+  ylab("Number of Players") +
+  scale_fill_manual(values = c("pink","darkcyan", "darkorange")) +  # Use custom colors
+  theme_minimal() +  # Applying the minimal theme
+  theme(legend.position = "top", 
+        legend.title = element_text(size = 12, face = "bold"),  # Making legend title more prominent
+        legend.text = element_text(size = 10))  # Adjusting legend text size
+
+grid.arrange(def_plot, att_plot, ncol = 1)
+
+```
+
+***General Observation***: Both plots depict the distribution of players across different clusters based on their defending and attacking work rates.
+The work rates are categorized into three groups: Low, Medium, and High.
+
+**Distribution by Defending Work Rate:**
+
+-   ***Cluster 1***: The majority of players in this cluster have a Low defensive work rate.
+    The Medium and High categories have nearly similar, but significantly lesser counts.
+
+-   ***Cluster 2***: The distribution is more balanced compared to Cluster 1.
+    However, the Medium category has a slight edge, with the Low and High work rates following closely.
+
+-   ***Cluster 3***: Most players in this cluster exhibit a High defensive work rate, with the Low work rate being the least prevalent.
+
+-   ***Cluster 4***: It is notable that the High defensive work rate dominates this cluster, with only a negligible presence of the Low and Medium categories.
+
+**Distribution by Attacking Work Rate:**
+
+-   ***Cluster 1***: Here, the majority of players possess a Low attacking work rate.
+    The Medium work rate is the next prevalent, with High being the least common.
+
+-   ***Cluster 2***: This cluster has a more diverse distribution.
+    The Medium attacking work rate is slightly more prevalent than the Low and High categories, which have nearly equal representation.
+
+-   ***Cluster 3***: The Low attacking work rate is the most common in this cluster, closely followed by the Medium category.
+    The High work rate, again, is the least common.
+
+-   ***Cluster 4***: This cluster is predominantly composed of players with a Medium attacking work rate.
+    The Low and High categories are minimally represented.
+
+**Comparative Analysis**: Clusters 1 and 3 appear to have more players with Low work rates in both defending and attacking.
+Cluster 2 displays a more balanced distribution across the three work rate categories for both defense and attack.
+Cluster 4 stands out, especially in the defensive plot, with an overwhelming majority of players having a High defensive work rate.
+This cluster also has a notably high concentration of players with a Medium attacking work rate.
+
+**Overall Insights**: Different clusters seem to represent different play styles or profiles.
+For instance, Cluster 4 might represent more defensively aggressive players.
+The balance in Cluster 2 suggests that it might be representing all-rounders or players with a more balanced play style.
+Clusters with a majority of Low work rates (like Cluster 1 in both plots) might indicate more passive or reserved players.
+
+### 3.3.2 Distribution of Age across clusters:
+
+```{r}
+ggplot(df, aes(x = factor(cluster), y = age)) +
+  geom_boxplot() +
+  ggtitle("Distribution of Age across Clusters") +
+  xlab("Cluster") +
+  ylab("Age")
+```
+
+***General Observation***: \* The boxplot showcases the distribution of age among players in four distinct clusters.
+\* The elements of each boxplot represent the following: 1.
+The bottom and top edges of each box are the 25th (Q1) and 75th (Q3) percentiles, respectively.
+2.
+The line inside the box represents the median (50th percentile).
+3.
+Whiskers extend to the minimum and maximum values within a range defined by Q1 - 1.5IQR and Q3 + 1.5IQR, where IQR is the interquartile range.
+Individual dots above or below the whiskers represent outliers.
+
+-   ***Cluster 1***: The median age lies around the early 30s.
+    The majority of players (within Q1 and Q3) are between their mid-20s and late 30s.
+    There are a few older outliers, with some players reaching their early 40s.
+
+-   ***Cluster 2***: The median age is also in the early 30s, similar to Cluster 1.
+    The age distribution (as represented by the box) seems slightly tighter than Cluster 1, indicating less variability in age.
+    Like Cluster 1, Cluster 2 has outliers in the early 40s.
+
+-   ***Cluster 3***: The median age seems to be slightly higher than that of Clusters 1 and 2, placing it in the mid-30s.
+    The age distribution is broader, with players ranging from their early 20s to early 40s within Q1 and Q3.
+    Multiple outliers are present, with ages extending beyond the early 40s, indicating that this cluster has some of the oldest players among the four.
+
+-   ***Cluster 4***: The median age in this cluster is noticeably younger, falling in the late 20s.
+    The majority of players are between their early 20s and early 30s, representing the youngest age distribution among the clusters.
+    Several outliers extend into the late 30s and early 40s.
+
+***Overall Insights***: Clusters 1 and 2 have somewhat similar age distributions with medians in the early 30s.
+They differ slightly in the spread of ages, with Cluster 1 having a broader distribution.
+Cluster 3 contains players with a wider age range and has the highest median age, indicating it might represent more experienced or veteran players.
+Cluster 4 primarily consists of younger players, suggesting it might represent emerging or newer talents in the sport.
+Outliers, especially in Clusters 3 and 4, indicate that there are always exceptional cases where players might not fit the general age trend of their cluster.
+
+### 3.3.3 Distribution of summary stats across clusters
+
+```{r}
+df_long <- tidyr::gather(df, key = "stat_type", value = "value", c(summary_pace, summary_pass, summary_dribbling, summary_physical))
+
+ggplot(df_long, aes(x = factor(cluster), y = value, fill = stat_type)) +
+  geom_boxplot() +
+  ggtitle("Distribution of Summary Stats across Clusters") +
+  xlab("Cluster") +
+  ylab("Stat Value") +
+  theme(legend.position = "top")
+```
+
+**General Observation**:
+
+-   The chart presents a comparison of four different player statistics: dribbling, pace, passing, and physical attributes across four clusters.
+-   Like the previous boxplot, the elements represent the quartiles, medians, whiskers, and outliers.
+
+**Cluster 1**:
+
+-   ***Dribbling (Red)***: Players in this cluster have dribbling stats predominantly in the 50s to 60s range, with a median around the mid-50s.
+
+-   ***Pace (Green)***: The pace values stretch mainly from the 50s to the 70s with a median in the 60s.
+
+-   ***Passing (Blue)***: Passing stats are mainly in the 40s to 60s range, with a median in the 50s.
+
+-   ***Physical (Purple)***: Physical attributes span mostly between the 60s and 70s, with the median in the mid-60s.
+
+**Cluster 2:**
+
+-   ***Dribbling (Red)***: Dribbling values are more spread out, ranging from the 40s to 70s with the median around the mid-50s.
+
+-   ***Pace (Green)***: Players in this cluster seem to have pace stats mainly in the 40s to 60s, with a median around the mid-50s.
+
+-   ***Passing (Blue)***: Passing abilities are primarily in the 50s to 70s range, with a median in the mid-60s.
+
+-   ***Physical (Purple)***: Physical attributes are mainly in the 60s to 70s, with the median hovering in the mid-60s.
+
+**Cluster 3:**
+
+-   ***Dribbling (Red)***: This cluster shows dribbling stats mainly between the 50s and 70s, with a median in the mid-60s.
+
+-   ***Pace (Green)***: The pace appears to be distributed predominantly in the 50s to the 70s with a median in the mid-60s.
+
+-   ***Passing (Blue)***: Passing skills range from the mid-40s to the 70s, with a median in the mid-60s.
+
+-   ***Physical (Purple)***: The physical attributes are mainly concentrated in the 60s, with a median also in the mid-60s.
+
+**Cluster 4:**
+
+-   ***Dribbling (Red)***: The dribbling stats are primarily in the 50s and 60s, with a median in the mid-50s.
+
+-   ***Pace (Green)***: Pace values span from the high 40s to the 60s, with a median in the mid-50s.
+
+-   ***Passing (Blue)***: Passing stats are seen mainly in the 50s and 60s range, with a median around the low 60s.
+
+-   ***Physical (Purple)***: Physical attributes seem to range from the mid-50s to the 70s, with the median in the mid-60s.
+
+**Overall Insights**: Across all clusters, there's a noticeable overlap in stat distributions, implying that players in these clusters may have similar abilities but differ in certain aspects that have been clustered upon.
+Cluster 3 players seem to exhibit relatively higher median values for dribbling and passing compared to the other clusters.
+Cluster 4 players tend to have a slightly broader range in their physical stats compared to the other clusters, potentially indicating a more diverse set of physical attributes among these players.
+Outliers in each cluster highlight players who possess exceptional or atypical skills for their cluster, warranting further investigation or individual consideration.
+
+### 3.3.4 Distribution of overall rating
+
+```{r}
+v_plot <- ggplot(df, aes(x = factor(cluster), y = overall_rating, fill = factor(cluster))) +
+  geom_violin() +
+  ggtitle("Distribution of Overall Rating across Clusters") +
+  xlab("Cluster") +
+  ylab("Overall Rating") +
+  scale_fill_manual(values = c("darkred", "darkblue", "darkgreen", "purple"))  # Adjust colors as needed
+
+j_plot <- ggplot(df, aes(x = factor(cluster), y = overall_rating, color = factor(cluster))) +
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  ggtitle("Distribution of Overall Rating across Clusters") +
+  xlab("Cluster") +
+  ylab("Overall Rating")
+
+r_plot <- ggplot(df, aes(x = overall_rating, y = factor(cluster), fill = factor(cluster))) +
+  geom_density_ridges() +
+  ggtitle("Distribution of Overall Rating across Clusters") +
+  xlab("Overall Rating") +
+  ylab("Cluster")
+
+f_plot <- ggplot(df, aes(x = overall_rating)) +
+  geom_density() +
+  facet_wrap(~cluster) +
+  ggtitle("Distribution of Overall Rating for Each Cluster") +
+  xlab("Overall Rating") +
+  ylab("Density")
+grid.arrange(v_plot, j_plot, r_plot, f_plot, ncol = 2)
+```
+
+**Violin Plot (v_plot)**: This plot offers a dense visualization of the distribution of the overall rating for each cluster.
+Cluster 1 (Red): Ratings primarily fall between 70 to 80 with the thickest part (mode) around 75-77.
+Cluster 2 (Blue): Ratings are mainly between 60 to 70 with the mode close to 65.
+Cluster 3 (Green): Ratings span mostly from 65 to 75 with the mode near 70.
+Cluster 4 (Purple): Ratings predominantly range from 75 to 85, with the mode around 80.
+
+**Jitter Plot (j_plot)**: The jitter plot presents individual data points while reducing overlap, giving a sense of the data density.
+Clusters 1, 2, 3, and 4: The spread of data points in each cluster confirms the distributions observed in the violin plot.
+
+**Density Ridges Plot (r_plot)**: This plot showcases the density of the overall ratings across clusters in a horizontal format.
+Cluster 1: The highest density is around the 75-77 rating mark.
+Cluster 2: The peak density is close to the 65 rating.
+Cluster 3: The density is most prominent around the 70 rating.
+Cluster 4: The peak is around the 80 rating.
+
+**Faceted Density Plot (f_plot)**: This chart displays the distribution of overall ratings for each cluster separately.
+Cluster 1: The curve peaks around the 75-77 rating range.
+Cluster 2: The density is highest close to the 65 rating.
+Cluster 3: The curve is most elevated around the 70 rating.
+Cluster 4: The density peaks near the 80 rating.
+
+**Overall Insights**: Cluster 1 (Red) consists of players with relatively high ratings, with most players rated around 75-77.
+Cluster 2 (Blue) has players with moderate ratings, with the majority being close to 65.
+Cluster 3 (Green) has players with good ratings, with a prominent peak around 70.
+Cluster 4 (Purple) includes players with very high ratings, the majority of whom are rated around 80.
+
+In summary, the charts effectively segment players based on their overall ratings into distinct clusters.
+Each cluster represents a different caliber of players, with Cluster 4 having the highest-rated players and Cluster 2 having moderately rated players.
+The visualizations provide a clear and comprehensive understanding of the overall rating distributions across the clusters.
+
+### 3.3.5 Distribution of defensive and offensive players
+
+```{r, message=FALSE}
+ggplot(df, aes(x = factor(cluster), fill = factor(positiontype))) +
+  geom_bar() +
+  facet_grid(rows = vars(positiontype), scales = "free_y") +
+  ggtitle("Distribution of Position Types across Clusters") +
+  xlab("Cluster") +
+  ylab("Count of Players") +
+  scale_fill_manual(values = c("darkred", "darkblue"), 
+                    breaks = c(0, 1),
+                    labels = c("Defensive Player", "Offensive Player")) +
+  theme_minimal() +
+  theme(
+    strip.background = element_rect(fill="grey90", colour="black", size=0.5),
+    strip.text = element_text(face="bold")
+  )
+```
+
+**Observations:**
+
+-   **Cluster 1**: The majority of players in this cluster are defensive.
+    The number of offensive players is significantly lower.
+
+-   **Cluster 2**: Both offensive and defensive players are present, but the count of defensive players is higher.
+
+-   **Cluster 3**: This cluster predominantly consists of offensive players.
+    The count of defensive players in this cluster is negligible.
+
+-   **Cluster 4**: The counts of offensive and defensive players are closer, with a slight edge towards the offensive players.
+
+-   **General Takeaways**: Cluster 1 is dominated by defensive players, whereas Cluster 3 is heavily skewed towards offensive
+
+players.
+Clusters 2 and 4 have a mix of both types but with varying proportions.
+The chart effectively showcases the distribution of player positions across clusters, allowing for insights into the characteristics or performance patterns that might define each cluster.
+
+# 4. References:
+
+1.  Al-Asadi, M. A., & Tasdemir, S.
+    (2021).
+    Empirical Comparisons for Combining Balancing and Feature Selection Strategies for Characterizing Football Players Using FIFA Video Game System.
+    IEEE Access, 9, 149266--149286.
+    <https://doi.org/10.1109/ACCESS.2021.3124931>
+
+2.  Yaldo, L., & Shamir, L.
+    (2017).
+    Computational Estimation of Football Player Wages.
+    International Journal of Computer Science in Sport, 16(1), 18--38.
+    <https://doi.org/10.1515/ijcss-2017-0002>
+
+3.  Pantzalis, V. C., & Tjortjis, C.
+    (2020).
+    Sports Analytics for Football League Table and Player Performance Prediction.
+    2020 11th International Conference on Information, Intelligence, Systems and Applications (IISA, 1--8. <https://doi.org/10.1109/IISA50023.2020.9284352>)
+
+4.  Soto Valero, C.
+    (2017).
+    A Gaussian mixture clustering model for characterizing football players using the EA Sports' FIFA video game system.
+    [Modelo basado en agrupamiento de mixturas Gaussianas para caracterizar futbolistas utilizando el sistema de videojuegos FIFA de EA Sports].
+    Revista Internacional de Ciencias Del Deporte, 13(49), 244--259.
+    <https://doi.org/10.5232/ricyde2017.04904>
+
+5.  Al-Asadi, M. A., & Tasdemir, S.
+    (2022).
+    Predict the Value of Football Players Using FIFA video game data and Machine Learning Techniques.
+    IEEE Access, 10, 1--1.
+    <https://doi.org/10.1109/ACCESS.2022.3154767>
+
+6.  Behravan, I., & Razavi, S. M.
+    (2021).
+    A novel machine learning method for estimating football players' value in the transfer market.
+    Soft Computing (Berlin, Germany), 25(3), 2499--2511.
+    <https://doi.org/10.1007/s00500-020-05319-3>
+
+7.  Obiedat, Ruba & Faisal, Mohammad & Faris, Hossam & Harfoushi, Osama & Nawafleh, Sahem.
+    (2013).
+    Identification of players' positions in a multi-agent game using artificial neural networks and C4.5 algorithm: A comparative study.
+    Scientific Research and Essays.8.10.5897/SRE2013.5497
+
+8.  Tavana, M., Azizi, F., Azizi, F., & Behzadian, M.
+    (2013).
+    A fuzzy inference system with application to player selection and team formation in multi-player sports.
+    Sport Management Review, 16(1), 97--110.
+    <https://doi.org/10.1016/j.smr.2012.06.002>
+
+9.  Kabacoff, R. I.
+    (2015).
+    R in Action (2nd ed.)Manning Publications.
+
+10. Yeung, C. C. K., Bunker, R., & Fujii, K.
+    (2023).
+    A framework of interpretable match results prediction in football with FIFA ratings and team formation.
+    PloS One, 18(4), e0284318--e0284318.
+    <https://doi.org/10.1371/journal.pone.0284318>
+
+# 5. Shiny App:
+
+```{r}
+library(shiny)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(shinythemes)
+library(shinybusy)
+
+ui <- fluidPage(
+  shinytheme("cerulean"),
+  add_busy_spinner(spin = "fading-circle"),
+  tags$header(tags$h1("FIFA21 Player Dataset - Classification & Clustering Results", align = "center", style = "color: #0066cc;")),
+  
+  wellPanel(
+    h3("Welcome to the FIFA21 Player Dataset - Classification & Clustering Results!"),
+    p("This dashboard allows you to explore various statistical analyses on FIFA players. Here's a quick overview of the features:"),
+    tags$ul(
+      tags$li("AUC Analysis: Evaluate and visualize the Area Under the Curve (AUC) for various player attributes."),
+      tags$li("Classifiers: Choose different classifiers (e.g., Decision Tree, K-Nearest Neighbor) based on either Chi-Square Test or Literature Review feature selection techniques."),
+      tags$li("Clustering: Visualize player clusters based on different attributes and understand the characteristics of each cluster.")
+    ),
+    p("Select an option from the menu to dive deeper into the analyses. Click on the 'i' icon next to each plot for more details.")
+  ),
+   
+  tags$style("
+             .shiny-options-group {
+               background-color: #f7f7f9;
+               padding: 10px;
+               border-radius: 5px;
+               margin-bottom: 20px;
+             }
+             "),
+  
+  radioButtons("page", "Choose Page:", 
+               choices = list("Single Variable Model AUC Analysis" = "auc", 
+                              "Classifiers" = "classifiers", 
+                              "Clustering" = "clustering"),
+               selected = "auc", inline = TRUE),
+  
+  conditionalPanel(
+    condition = "input.page == 'auc'",
+    
+    sidebarLayout(
+      sidebarPanel(
+        sliderInput("aucThreshold", "AUC Threshold:", min = 0, max = 1, value = 0.7, step = 0.1),
+        uiOutput("varSelector"),
+        helpText("Select up to 3 variables from the list above."),
+        actionButton("clearSelection", "Clear Selection")
+      ),
+      
+      mainPanel(
+        column(5, tableOutput("aucResults")),
+        column(5, plotOutput("densityPlots")),
+        helpText("Density plots of the selected variables."),
+        column(1, actionButton("info_densityPlots", label = icon("info-circle")))
+      )
+    )
+  ),
+  
+  conditionalPanel(
+    condition = "input.page == 'classifiers'",
+    h2("Classifiers"),
+    div(class = "shiny-options-group",
+        radioButtons(
+            "classifierType",
+            "Choose Classifier Basis:",
+            choices = list(
+                "Chi-Square Test" = "chi_square",
+                "Literature Review" = "literature_review"
+            ),
+            selected = "chi_square"
+        )
+    ),
+    div(class = "shiny-options-group",
+        radioButtons(
+            "modelType",
+            "Choose model type:",
+            choices = list(
+                "Decision Tree" = "decision_tree",
+                "K-Nearest Neighbor" = "k_nearest_neighbor"
+            ),
+            selected = "decision_tree"
+        )
+    ),
+    fluidRow(
+        column(5, plotOutput("decisionTreePlot")),
+        column(1, actionButton("info_decisionTreePlot", label = icon("info-circle"))),
+        column(5, plotOutput("knnPlot")),
+        column(1, actionButton("info_knnPlot", label = icon("info-circle")))
+    ),
+    fluidRow(
+        column(5, plotOutput("performanceComparisonPlot")),
+        column(1, actionButton("info_performanceComparisonPlot", label = icon("info-circle"))),
+        column(5, plotOutput("confusionMatrixPlot")),
+        column(1, actionButton("info_confusionMatrixPlot", label = icon("info-circle")))
+    )
+  ),
+  
+  conditionalPanel(
+    condition = "input.page == 'clustering'",
+    h2("Clustering"),
+    div(class = "shiny-options-group",
+        style = "display: inline-block; vertical-align: top; width: 30%;", 
+        radioButtons("clusterOption", "Choose Cluster Visualization:", 
+                     choices = list("Cluster Visualization" = "cluster_viz", 
+                                    "Player Work Rate across Clusters" = "work_rate_viz", 
+                                    "Player Age across Clusters" = "player_age_viz", 
+                                    "Summary Stats across Clusters" = "summary_stats_viz", 
+                                    "Overall Ratings across Clusters" = "overall_ratings_viz", 
+                                    "Attacking vs Defensive Players across Clusters" = "attackvdiff_viz"),
+                     selected = "cluster_viz")
+    ),
+    div(style = "display: inline-block; vertical-align: top; width: 65%;",
+        plotOutput("clusterPlot"), 
+        tags$br(), 
+        textOutput("clusterPlotText")
+    )
+  ),
+  tags$footer(tags$p("Created by Aadil VAGH and Nicodemus ONG.", 
+                    style = "text-align: center; margin-top: 25px; color: #666;"))
+
+)
+
+
+server <- function(input, output, session) {
+  
+  aucFilteredVars <- reactive({
+    selected_vars <- character(0)
+    for(v in colnames(cat_df)) {
+      pi <- paste('pred', v, sep='')
+      aucTrain <- suppressMessages(calcAUC(train_set[,pi], train_set[,target]))
+      if (aucTrain >= input$aucThreshold) {
+        selected_vars <- c(selected_vars, v)
+      }
+    }
+    return(selected_vars)
+  })
+
+  selectedVars <- reactiveVal()
+
+  observe({
+    if (length(input$selectedVars) > 3) {
+      # Notify the user
+      showModal(modalDialog(
+        title = "Selection Limit Reached",
+        "You can only select up to 3 variables.",
+        easyClose = TRUE
+      ))
+      # Revert to previous selection
+      updateSelectInput(session, "selectedVars", selected = selectedVars())
+    } else {
+      selectedVars(input$selectedVars)
+    }
+  })
+
+  observeEvent(input$clearSelection, {
+    updateSelectInput(session, "selectedVars", selected = character(0))
+  })
+
+  output$varSelector <- renderUI({
+    selectInput("selectedVars", "Select Variables to Plot:", 
+                choices = aucFilteredVars(), 
+                selected = selectedVars(), 
+                multiple = TRUE, 
+                selectize = TRUE)
+  })
+
+  output$aucResults <- renderTable({
+    results <- calculateAUCStatistics(aucFilteredVars(), cat_df, target)
+    arrange(results, desc(Mean_AUC))
+  })
+  
+  output$densityPlots <- renderPlot({
+    selected_vars <- input$selectedVars
+    
+    if (length(selected_vars) > 0) {
+      plot_list <- list()
+      
+      for (var in selected_vars) {
+        p <- ggplot(test_set, aes_string(x = var, color = "as.factor(positiontype)")) + geom_density()
+        plot_list[[var]] = p
+      }
+      
+      do.call(grid.arrange, c(plot_list, ncol=1))
+    } else {
+      ggplot() + labs(title = "Please select variables to display plots")
+    }
+  })
+
+    results <- reactive({
+    if (input$classifierType == "chi_square") {
+      list(
+        decision_tree = model_performance(decision_model, test_set, "positiontype"),
+        knn = model_performance_knn(knn_model, test_set_normalized, "positiontype")
+      )
+    } else {
+      list(
+        decision_tree = model_performance(decision_model_lr, test_set, "positiontype"),
+        knn = model_performance_knn(knn_model_lr, test_set_normalized, "positiontype")
+      )
+    }
+  })
+
+  output$decisionTreePlot <- renderPlot({
+    if (input$modelType == "decision_tree" && input$classifierType == "chi_square") {
+        model_performance(decision_model, test_set, "positiontype")
+    } else if (input$modelType == "decision_tree" && input$classifierType == "literature_review") {
+        model_performance(decision_model_lr, test_set, "positiontype")
+    } else {
+        ggplot() + labs(title = "This section is intentionally blank")
+    }
+})
+
+output$knnPlot <- renderPlot({
+    if (input$modelType == "k_nearest_neighbor" && input$classifierType == "chi_square") {
+        model_performance_knn(knn_model, test_set_normalized, "positiontype")
+    } else if (input$modelType == "k_nearest_neighbor" && input$classifierType == "literature_review") {
+        model_performance_knn(knn_model_lr, test_set_normalized, "positiontype")
+    } else {
+        ggplot() + labs(title = "This section is intentionally blank")
+    }
+})
+
+output$performanceComparisonPlot <- renderPlot({
+    if (input$classifierType == "chi_square") {
+        plot_performance_comparison(decision_tree_results$Metrics, knn_results$Metrics, "Chi Square Test")
+    } else if (input$classifierType == "literature_review") {
+        plot_performance_comparison(decision_tree_results_lr$Metrics, knn_results$Metrics, "Literature Review")
+    } else {
+        ggplot() + labs(title = "Plot not appropriate for selected feature selection technique")
+    }
+})
+
+output$confusionMatrixPlot <- renderPlot({
+    if (input$classifierType == "chi_square") {
+        display_confusion_matrices(decision_tree_results$ConfusionMatrix, knn_results$ConfusionMatrix, "Chi Square Test")
+    } else if (input$classifierType == "literature_review") {
+        display_confusion_matrices(decision_tree_results$ConfusionMatrix, knn_results$ConfusionMatrix, "Literature Review")
+    } else {
+        ggplot() + labs(title = "Plot not appropriate for selected feature selection technique")
+    }
+})
+
+output$clusterPlot <- renderPlot({
+    if (input$clusterOption == "cluster_viz") {
+      ggplot(pca_data, aes(x = PC1, y = PC2, color = as.factor(cluster))) +
+        geom_point() +
+        theme_minimal() +
+        labs(title = "PCA Cluster Visualization", x = "Principal Component 1", y = "Principal Component 2")
+    } else if (input$clusterOption == "work_rate_viz") {
+      def_plot <- ggplot(df, aes(x = factor(cluster), fill = defensive_work_rate)) +
+                  geom_bar() +
+                  ggtitle("Distribution of Players across Clusters by Defending Work Rate") +
+                  xlab("Cluster") +
+                  ylab("Number of Players") +
+                  scale_fill_manual(values = c("pink","darkcyan", "darkorange")) +  # Use custom colors
+                  theme_minimal() +  # Applying the minimal theme
+                  theme(legend.position = "top", 
+                        legend.title = element_text(size = 12, face = "bold"),  # Making legend title more prominent
+                        legend.text = element_text(size = 10))  # Adjusting legend text size
+
+      att_plot <- ggplot(df, aes(x = factor(cluster), fill = attacking_work_rate)) +
+                  geom_bar() +
+                  ggtitle("Distribution of Players across Clusters by Attacking Work Rate") +
+                  xlab("Cluster") +
+                  ylab("Number of Players") +
+                  scale_fill_manual(values = c("pink","darkcyan", "darkorange")) +  # Use custom colors
+                  theme_minimal() +  # Applying the minimal theme
+                  theme(legend.position = "top", 
+                        legend.title = element_text(size = 12, face = "bold"),  # Making legend title more prominent
+                        legend.text = element_text(size = 10))  # Adjusting legend text size
+
+
+      grid.arrange(def_plot, att_plot, ncol = 1)
+    } else if (input$clusterOption == "player_age_viz") {
+      ggplot(df, aes(x = factor(cluster), y = age)) +
+      geom_boxplot() +
+      ggtitle("Distribution of Age across Clusters") +
+      xlab("Cluster") +
+      ylab("Age")
+      
+    } else if (input$clusterOption == "summary_stats_viz") {
+      ggplot(df_long, aes(x = factor(cluster), y = value, fill = stat_type)) +
+      geom_boxplot() +
+      ggtitle("Distribution of Summary Stats across Clusters") +
+      xlab("Cluster") +
+      ylab("Stat Value") +
+      theme(legend.position = "top")
+      
+    } else if (input$clusterOption == "overall_ratings_viz") {
+      v_plot <- ggplot(df, aes(x = factor(cluster), y = overall_rating, fill = factor(cluster))) +
+                geom_violin() +
+                ggtitle("Distribution of Overall Rating across Clusters") +
+                xlab("Cluster") +
+                ylab("Overall Rating") +
+                scale_fill_manual(values = c("darkred", "darkblue", "darkgreen", "purple"))  
+    
+      j_plot <- ggplot(df, aes(x = factor(cluster), y = overall_rating, color = factor(cluster))) +
+                geom_jitter(width = 0.2, alpha = 0.5) + 
+                ggtitle("Distribution of Overall Rating across Clusters") +
+                xlab("Cluster") +
+                ylab("Overall Rating")
+      
+      r_plot <- ggplot(df, aes(x = overall_rating, y = factor(cluster), fill = factor(cluster))) +
+                geom_density_ridges() +
+                ggtitle("Distribution of Overall Rating across Clusters") +
+                xlab("Overall Rating") +
+                ylab("Cluster")
+      
+      f_plot <- ggplot(df, aes(x = overall_rating)) +
+                geom_density() +
+                facet_wrap(~cluster) +
+                ggtitle("Distribution of Overall Rating for Each Cluster") +
+                xlab("Overall Rating") +
+                ylab("Density")
+                grid.arrange(v_plot, j_plot, r_plot, f_plot, ncol = 2)
+        
+    } else if (input$clusterOption == "attackvdiff_viz") {
+       ggplot(df, aes(x = factor(cluster), fill = factor(positiontype))) +
+        geom_bar() +
+        facet_grid(rows = vars(positiontype), scales = "free_y") +
+        ggtitle("Distribution of Position Types across Clusters") +
+        xlab("Cluster") +
+        ylab("Count of Players") +
+        scale_fill_manual(values = c("darkred", "darkblue"), 
+                          breaks = c(0, 1),
+                          labels = c("Defensive Player", "Offensive Player")) +
+        theme_minimal() +
+        theme(
+          strip.background = element_rect(fill="grey90", colour="black", size=0.5),
+          strip.text = element_text(face="bold"))
+    }
+  
+})
+
+observeEvent(input$info_decisionTreePlot, {
+    showModal(modalDialog(
+      title = "Decision Tree Plot",
+      "Class 0 (Pink/Red Distribution): A large majority of the observations predicted to belong to class 0 have probabilities close to 0, indicating that the model is quite confident in these predictions. There’s a smaller peak around the 0.5 probability mark, suggesting some uncertainty in a subset of predictions for this class.
+
+Class 1 (Teal/Blue Distribution): Most of the predictions for class 1 are strongly skewed towards a probability of 1, implying that the model is very confident about these classifications. However, there’s a smaller bump around the 0.5 mark, indicating that there are some observations for which the model is less certain.
+
+Overlap Area: The overlap between the two distributions around the 0.5 mark suggests that there’s a zone of uncertainty where the model isn’t distinctly confident about classifying observations as either 0 or 1.
+
+"
+    ))
+  })
+
+  observeEvent(input$info_knnPlot, {
+    showModal(modalDialog(
+      title = "K-Nearest Neighbors Plot",
+      "The classifier exhibits commendable performance, especially in accurately discerning Defensive players. The relatively low counts of false positives and false negatives further attest to its efficacy. When supplemented with additional metrics such as precision, recall, and the F1 score—derived from the confusion matrix values—it offers a holistic evaluation of the model’s effectiveness."
+    ))
+  })
+
+  observeEvent(input$info_performanceComparisonPlot, {
+    showModal(modalDialog(
+      title = "Performance Comparison Plot",
+      "This plot provides a performance comparison between the Decision Tree and K-Nearest Neighbors classifiers."
+    ))
+  })
+
+  observeEvent(input$info_confusionMatrixPlot, {
+    showModal(modalDialog(
+      title = "Confusion Matrix Plot",
+      "This plot displays a confusion matrix, showcasing the performance of the classifiers in terms of true positives, false positives, true negatives, and false negatives."
+    ))
+  })
+  
+  observeEvent(input$info_densityPlots, {
+    showModal(modalDialog(
+      title = "AUC Density Plots",
+      "The displayed density plots show the distributions of the selected variables, separated by the target class. A variable with a clear distinction between the two distributions (based on the target class) would typically have a higher AUC value."
+    ))
+  })
+
+  # Dynamic text for clustering plots:
+  output$clusterPlotText <- renderText({
+    if (input$clusterOption == "cluster_viz") {
+      return("This plot visualizes the different clusters formed using PCA.")
+    } else if (input$clusterOption == "work_rate_viz") {
+      return("This plot shows the distribution of player work rates across different clusters.")
+    } else if (input$clusterOption == "player_age_viz") {
+      return("This plot displays the distribution of player ages across different clusters.")
+    } else if (input$clusterOption == "summary_stats_viz") {
+      return("This plot depicts the distribution of player summary statistics across different clusters.")
+    } else if (input$clusterOption == "overall_ratings_viz") {
+      return("Here, you can observe the distribution of overall player ratings across different clusters.")
+    } else if (input$clusterOption == "attackvdiff_viz") {
+      return("This plot visualizes the distribution of attacking vs. defensive players across different clusters.")
+    } else {
+      return("")
+    }
+  })
+
+}
+
+shinyApp(ui, server)
+```

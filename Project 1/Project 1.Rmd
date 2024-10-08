@@ -1,0 +1,704 @@
+---
+title: "CITS4009 - Project 1"
+author: "Nicodemus ONG (22607943)"
+date: "20 August 2023"
+output: html_notebook
+---
+
+# Introduction
+
+The dataset analyzed can be obtained from the Kaggle platform. It's part of the **'Global YouTube Statistics 2023'** dataset. This dataset provides comprehensive insights into YouTube's global statistics for the year 2023.
+
+For more details and access to the dataset, you can visit the following link: <https://www.kaggle.com/datasets/nelgiriyewithana/global-youtube-statistics-2023>
+
+The dataset offers a wealth of information about YouTube's Youtuber performance, trends, and user engagement and many other information that functions as a valuable resource for those interested in understanding the dynamics of one of the world's most popular online platforms.
+
+## Youtube Link
+
+Here is the YouTube link explaining my Shiny implementation later on: <https://youtu.be/mzqJw1AdGJ0>
+
+# Overview
+
+In this report, we will explore the process of cleaning and preprocessing YouTube data using R. The objective is to prepare the data for further analysis and insights. The script provided performs a series of steps, including package installation, data loading, formatting, special character removal, and data filtering. We will break down each step and understand its purpose. Through this report, we will delve into each step of the process, examining the rationale behind it and showcasing the associated R code. The goal is to provide a clear understanding of the data processing journey and its impact on the subsequent stages of analysis and visualization.
+
+# Initialization
+
+### Installing the Packages
+
+We start by first installing and loading necessary packages such as **`tidyverse`**, **`dplyr`**, and **`stringr`** to facilitate data manipulation and transformation.
+
+```{r message=FALSE, warning=FALSE}
+install.packages("tidyverse")
+install.packages("dplyr")
+install.packages("stringr")
+install.packages("ggthemes")
+install.packages("ggplot2")
+install.packages("countrycode")
+install.packages("maps")
+install.packages("ggmap")
+install.packages("cowplot")
+install.packages("rlang")
+```
+
+### Load libraries and declare special characters
+
+Then, we address loading in the libraries.
+
+```{r, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(ggthemes)
+library(gridExtra)
+library(maps)
+library(countrycode)
+library(ggmap)
+library(cowplot)
+library(rlang)
+```
+
+I will set up a plotting theme so that all charts would look coherent
+
+```{r, message=FALSE, warning=FALSE}
+custom_theme <- function() {
+  theme_minimal() +
+    theme(
+      text = element_text(color = "#333333"),
+      plot.title = element_text(color = "#1F497D", size = 18, face = "bold"),
+      axis.title = element_text(size = 14, color = "#333333"),
+      axis.text = element_text(size = 12, color = "#333333"),
+      axis.line = element_line(color = "#333333"),
+      legend.title = element_text(size = 12, color = "#333333"),
+      legend.text = element_text(size = 10, color = "#333333"),
+      panel.background = element_rect(fill = "#F2F2F2"),
+      panel.grid.major = element_line(color = "#D9D9D9"),
+      panel.grid.minor = element_blank(),
+      plot.background = element_rect(fill = "#F2F2F2"),
+      legend.background = element_rect(fill = "#FFFFFF", color = "#D9D9D9"),
+      legend.key = element_rect(fill = "transparent")
+    )
+}
+
+# Apply custom theme to all plots
+graph_theme <- custom_theme()
+```
+
+## Data Transformation
+
+### Reading and preprocessing of YouTube data
+
+Following this, we read in the YouTube data from a CSV file, convert column names to lowercase, and perform formatting adjustments for specific columns. We filter out records with zero video views, as they may not contribute meaningfully to the analysis. Special characters within each row are then removed to ensure data consistency.
+
+```{r, message=FALSE, warning=FALSE}
+setwd("/Users/nathanielong/Documents/Masters/CITS4009")
+#1. Read in youtube data
+youtube_data <- read.csv("dataset.csv")
+youtube_data <- youtube_data %>%
+  mutate_if(is.character, tolower)
+
+#2. fix formatting of column names
+youtube_data <- youtube_data %>%
+  rename(
+    gross_tertiary_education_enrollment = Gross.tertiary.education.enrollment....,
+    unemployment_rate = Unemployment.rate,
+    video_views = video.views
+  )
+
+#3. Rename all other columns to lowercase
+colnames(youtube_data) <- tolower(colnames(youtube_data))
+```
+
+After the initial reading preprocessing of data has been done, we can better visualize the dataset through steps such as:
+
+-   Using *`str()`* to understand the structure of the data.
+-   Utilizing *`summary()`* for a summary of statistical measures.
+-   Examining the first few rows with *`head()`* to get a sense of the data.
+
+### Checking data structure
+
+Let's explore the dataset's structure using **str()**, summary statistics using **summary()**, and a preview using **head()**.
+
+#### Structure command [*str()*]
+
+```{r, message=FALSE, warning=FALSE}
+str(youtube_data)
+```
+
+The provided output represents a data frame containing 995 observations **(rows)** and 28 variables **(columns)**. Each variable is accompanied by its data type and a brief description of its content. Among the **key variables** are *rank, youtuber, subscribers, video_views, category, title, uploads,* and others. These variables hold information such as rankings, YouTube channel names, subscriber counts, video views, categories, and more. **Numeric variables** like *subscribers, video_views, and uploads* are indicated with **int** (integer) or **num** (numeric) data types, while character variables like *youtuber, category, and title* are denoted as **chr** (character). The output provides a snapshot of the first few rows of actual data within these variables, giving a glimpse into the content of the dataset. This concise overview helps to understand the composition and structure of the data, making it easier to navigate and analyze the information within the data frame.
+
+#### Summary command [*summary()*]
+
+```{r, message=FALSE, warning=FALSE}
+summary(youtube_data)
+```
+
+The **summary()** function is used to generate summary statistics for each variable in the data frame.
+
+-   *rank, subscribers, video_views, uploads, video_views_rank, country_rank, channel_type_rank, video_views_for_the_last_30_days, lowest_monthly_earnings, highest_monthly_earnings, lowest_yearly_earnings, highest_yearly_earnings, subscribers_for_last_30_days, created_year, created_month, created_date, gross_tertiary_education_enrollment, population, unemployment_rate, urban_population, latitude, longitude*: These are variables in your dataset. The summary statistics are provided for each of these variables.
+-   For numeric variables (like rank, subscribers, etc.), summary() provides statistics such as the minimum, 1st quartile (25th percentile), median (50th percentile), mean, 3rd quartile (75th percentile), and maximum values.
+-   For character variables (like youtuber, category, etc.), summary() provides information on the class (character), length (number of elements), and mode (most common value) of the variable.
+
+The summary also includes counts of missing values (NA's) for each variable.
+
+Based on the summary data provided (*e.g. rank, subscribers, video_views, uploads...*), we can see that the data is rightly-skewed
+
+#### Head command [*head()*]
+
+```{r, message=FALSE, warning=FALSE}
+head(youtube_data)
+```
+
+The **head()** function displays the first few rows of the data frame, giving you a preview of its contents.
+
+-   The output shows the first 6 rows of your youtube_data data frame.
+
+-   Each row represents an observation (a YouTube channel) and each column represents a variable (attribute) associated with that channel.
+
+-   The columns include various attributes such as *rank, Youtuber, subscribers, video_views, category, title, uploads, country, abbreviation, channel_type, video_views_rank, country_rank, channel_type_rank, video_views_for_the_last_30_days, lowest_monthly_earnings, highest_monthly_earnings, lowest_yearly_earnings, highest_yearly_earnings, subscribers_for_last_30_days, created_year, created_month, created_date, gross_tertiary_education_enrollment, population, unemployment_rate, urban_population, latitude, and longitude*.
+
+-   The values in each cell of the table represent the specific information for each YouTube channel, such as their *rankings, number of subscribers, video views, category, country*, and other attributes.
+
+-   If a value is missing or not available, it is represented as *"NaN"* (Not a Number).
+
+In summary, the output from head(youtube_data) provides a concise look at the beginning of your dataset, giving you a sense of the kind of information it contains and its structure.
+
+### Cleaning of data
+
+The script handles blank values and "NaN" entries by replacing them appropriately or removing corresponding records. Lastly, lines with missing category or date-related information are dropped, resulting in a refined dataset for analysis.
+
+```{r, message=FALSE, warning=FALSE}
+#4. Replace "NaN" (case-insensitive) with blanks
+youtube_data <- youtube_data %>%
+  mutate_all(~ ifelse(tolower(.) == "nan", "", .)) %>%
+  mutate_all(str_squish) %>%
+  mutate_all(~ ifelse(str_trim(.) == "", NA, .))
+```
+
+Finally Due to the transformation steps taken, the data structure has been changed and thus we shall change it back to what is should be
+
+```{r, message=FALSE, warning=FALSE}
+#5. Convert type back to original
+# Convert relevant columns to numeric/integer types
+numeric_columns <- c(
+  "video_views", 
+  "country_rank", "channel_type_rank", 
+  "video_views_for_the_last_30_days", "lowest_monthly_earnings",
+  "highest_monthly_earnings", "lowest_yearly_earnings", 
+  "highest_yearly_earnings", "subscribers_for_last_30_days",
+  "created_year", "population", "gross_tertiary_education_enrollment",
+  "unemployment_rate", "urban_population", "latitude", "longitude"
+)
+
+youtube_data <- youtube_data %>%
+  mutate(across(all_of(numeric_columns), ~ as.numeric(gsub(",", "", .)))) %>%
+  mutate(created_year = as.integer(created_year)) %>% 
+  mutate(rank = as.integer(rank)) %>%
+  mutate(subscribers = as.integer(subscribers)) %>%
+  mutate(uploads = as.integer(uploads)) %>%
+  mutate(video_views_rank = as.integer(video_views_rank))
+
+```
+
+We will also add a new column called *"country_percentile_rank"*. This will be primarily calculated based of the specific Youtuber country rank.
+
+```{r}
+#6. Calculate country_percentile_rank
+youtube_data <- youtube_data %>%
+  group_by(country) %>%
+  mutate(
+    country_total_ranks = n(),
+    country_percentile_rank = (rank(rank) - 1) / (country_total_ranks - 1)
+  ) %>%
+  ungroup() %>%
+  mutate(country_percentile_rank = case_when(
+    country_percentile_rank <= 0.2 ~ "1-20%",
+    country_percentile_rank <= 0.4 ~ "21-40%",
+    country_percentile_rank <= 0.6 ~ "41-60%",
+    country_percentile_rank <= 0.8 ~ "61-80%",
+    TRUE ~ "81-100%"
+  ))
+```
+
+#### Analyzing missing values
+
+```{r, message=FALSE, warning=FALSE}
+# Analyze missing values
+apply(is.na(youtube_data), 2, sum)
+```
+
+### Interlinked Data Variables and Missing Values:
+
+In the provided dataset, you'll find a set of important variables including *latitude, longitude, unemployment rate, gross tertiary education enrollment, population, abbreviation, and country*. What's notable about these variables is their intrinsic connection to each other through the concept of "country." Each variable is intricately tied to the identity of a specific country.
+
+For instance, latitude and longitude pinpoint a geographical location on Earth for each country. Unemployment rate, gross tertiary education enrollment, and population statistics provide insights into the economic and demographic characteristics of a country. Abbreviations offer standardized codes for identifying countries, while the country variable itself holds the country's name.
+
+#### The Missing Value Problem:
+
+Given this interlinked nature of the variables, a significant observation arises: when information is missing for one variable, it tends to propagate to other variables as well. Imagine that data for latitude or longitude is absent for a particular country. Since these coordinates correspond to a specific geographical point, the missing latitude and longitude values would inherently affect other variables tied to that location.
+
+For instance, if latitude and longitude are missing, it becomes difficult to accurately ascertain population, unemployment rate, and tertiary education enrollment figures for that same location. Similarly, missing information for abbreviation or country name directly influences the interpretability and integration of the other variables, as it's challenging to attribute values to an unidentified country.
+
+Hence without the primary information of latitude and longitude, it will be impossible to identify the country and the other respective information.
+
+#### Replacing missing values where applicable
+
+based on the previous observation, we can see that *channel_type, country, category* are two categorical values that can be replaced with a new category all in itself. We shall put them under "others".
+
+```{r, message=FALSE, warning=FALSE}
+# Replace NA values with a new category
+youtube_data$channel_type[is.na(youtube_data$channel_type)] <- "others"
+youtube_data$country[is.na(youtube_data$country)] <- "others"
+youtube_data$category[is.na(youtube_data$category)] <- "others"
+youtube_data$abbreviation[is.na(youtube_data$abbreviation)] <- "others"
+```
+
+as for *video_views_for_the_last_30_days* and *subscribers_for_last_30_days*, we can make the assumption that NA means they have 0 growth hence we will replace the NA values as 0
+
+```{r, message=FALSE, warning=FALSE}
+# Replace NA values with 0
+youtube_data$subscribers_for_last_30_days[is.na(youtube_data$subscribers_for_last_30_days)] <- 0
+youtube_data$video_views_for_the_last_30_days[is.na(youtube_data$video_views_for_the_last_30_days)] <- 0
+```
+
+## Visualization
+
+### Analyzing Subscribers and Video Views
+
+Since these are right-skewed variables, we'll use two histograms to analyze the distribution: one with a log10 scale and one with a truncated linear scale
+
+##### Log10 Scale Histogram
+
+-   Advantages: A log10 scale histogram is particularly useful for visualizing the distribution of highly skewed variables. It can help in spreading out the data and making patterns more apparent, especially when there's a wide range of values. It allows you to better observe the variations in the lower range while also giving an idea of the higher values. This can be especially helpful when dealing with variables like subscribers, views, or earnings that have both small and extremely large values.
+
+-   Drawbacks: While a log10 scale can reveal patterns in the data, it may not be immediately intuitive to all viewers. Interpretation of the axis ticks and values can require a bit more cognitive effort.
+
+##### Truncated Linear Scale Histogram
+
+-   Advantages: A truncated linear scale histogram maintains the original scale of the data while cutting off extreme values for better visualization of the main distribution. This can be helpful when you want to focus on the majority of the data and remove the influence of outliers. It's generally more intuitive for viewers who are not familiar with log scales.
+
+-   Drawbacks: Truncating the scale might result in a compressed view of the distribution, potentially making it difficult to identify the presence of outliers or the finer details of the tail.
+
+**using both histograms can provide a more comprehensive understanding of the data's distribution**
+
+#### Subscribers
+
+```{r, fig.width = 12, message=FALSE, warning=FALSE}
+p1_subscribers <- ggplot(data = youtube_data, mapping = aes(x = subscribers)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "grey") +
+  geom_density(color = 'darkred') +
+  scale_x_continuous(trans = 'log10') +
+  ggtitle("Subscribers (Log Scale)") + 
+  graph_theme
+
+p2_subscribers <- ggplot(data = youtube_data, mapping = aes(x = subscribers)) +
+  geom_histogram(aes(y = ..density..), bins = 100, fill = "grey") +
+  geom_density(color = 'darkred') +
+  scale_x_continuous(limits = c(0, 2.45e+08), breaks = seq(0, 3e+08, by = 5e+07)) +
+  ggtitle("Subscribers (Up to 300 Million)") +
+  annotate("text", x = 1e+08, y = 5.0e-08, label = "Majority of top youtubers fall just under 50M,\n of which most are around 25M") +
+  graph_theme
+grid.arrange(p1_subscribers, p2_subscribers, ncol = 1)
+```
+
+As we can see, majority of the top content creators have just under 50M subscribers although there are still some outliers that are well over that number
+
+#### Video Views
+
+```{r, fig.width = 12, message=FALSE, warning=FALSE}
+# Analyzing Video Views
+p1_video_views <- ggplot(data = youtube_data, mapping = aes(x = video_views)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "grey") +
+  geom_density(color = 'darkred') +
+  scale_x_continuous(trans = 'log10') +
+  ggtitle("Video Views (Log Scale)") + 
+  graph_theme
+
+p2_video_views <- ggplot(data = youtube_data, mapping = aes(x = video_views)) +
+  geom_histogram(aes(y = ..density..), bins = 100, fill = "grey") +
+  geom_density(color = 'darkred') +
+  scale_x_continuous(limits = c(0, 2.280e+11)) +
+  ggtitle("Video Views (Up to 228 Billion)") +
+  graph_theme
+grid.arrange(p1_video_views, p2_video_views, ncol = 1)
+```
+
+Similarly, video views of the top youtubers congregate near the 10B mark with certain outliers that are higher
+
+#### Correlation between both subscriber and youtuber
+
+We can further represent the data and see if there is any correlation between a high/low subscribed youtuber vs high/low video views of said youtuber
+
+```{r, fig.width = 12, message=FALSE, warning=FALSE}
+correlation_plot <- ggplot(data = youtube_data, aes(x = subscribers, y = video_views)) +
+  geom_point(alpha = 0.6, color = 'darkblue') +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +  # Adding the trendline
+  scale_x_continuous(trans = 'log10') +
+  scale_y_continuous(trans = 'log10') +
+  ggtitle("Correlation between Subscribers and Video Views (Log Scale)") +
+  xlab("Subscribers") + ylab("Video Views") +
+  graph_theme
+grid.arrange(correlation_plot, ncol = 1)
+```
+
+Based on the scatter plot graph, we can see distinctively that there is a trend line threading upwards showing that the higher the subscriber count it, it correlates to having a higher video view count as well.
+
+### Analyzing Youtuber countries and population
+
+```{r, message=FALSE, warning=FALSE}
+highest_data <- youtube_data %>%
+  group_by(country) %>%
+  summarize(population = max(population, na.rm = TRUE),
+            urban_population = max(urban_population, na.rm = TRUE),
+            longitude = max(longitude, na.rm = TRUE),
+            latitude = max(latitude, na.rm = TRUE)) %>%
+  ungroup() %>%
+  left_join(select(youtube_data, country, abbreviation), by = "country") %>%
+  distinct(country, population, urban_population, longitude, latitude, abbreviation)
+# Use the countrycode library to add the actual country code
+highest_data <- highest_data %>%
+  mutate(country_code = countrycode(country, origin = "country.name", destination = "iso3c"))
+highest_data <- highest_data %>%
+  arrange(population) %>%
+  mutate(country = factor(country, levels = country))  # Reorder the factor levels
+```
+
+Now, we want to represent the population of each country and demonstrate how certain countries have significantly more population compared to the others hence why their views or subscribers may be more.
+
+```{r, fig.width = 12, message=FALSE, warning=FALSE}
+population_bar_plot <- ggplot(highest_data, aes(x = country, y = population)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  coord_flip() +
+  labs(title = "Total Population in Each Country",
+       x = "Country",
+       y = "Population") +
+  graph_theme
+grid.arrange(population_bar_plot, ncol = 1)
+```
+
+Building off this, there is a suspicion that the countries with a high overall population may also have a significant number of citizens who live in urbanized residential areas.
+
+```{r, fig.width = 12, message=FALSE, warning=FALSE}
+urban_population_bar_plot <- ggplot(highest_data, aes(x = country, y = urban_population)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  coord_flip() +
+  labs(title = "Total Urban Population in Each Country",
+       x = "Country",
+       y = "Urban Population") +
+  graph_theme
+
+grid.arrange(urban_population_bar_plot, ncol = 1)
+```
+
+Now with these two graphs available, we can combined them both into a single graph to show the difference between them.
+
+```{r, fig.width = 12, message=FALSE, warning=FALSE}
+combined_bar_plot <- ggplot(highest_data, aes(x = country)) +
+  geom_bar(aes(y = population, fill = "Total Population"), stat = "identity", position = "stack") +
+  geom_bar(aes(y = urban_population, fill = "Urban Population"), stat = "identity", position = "stack") +
+  coord_flip() +
+  labs(title = "Population Analysis by Country",
+       x = "Country",
+       y = "Population") +
+  scale_fill_manual(values = c("Total Population" = "darkred", "Urban Population" = "darkblue")) +
+  graph_theme
+grid.arrange(combined_bar_plot, ncol = 1)
+
+```
+
+as suspected, countries with a huge population also has a huge number of citizens who live in urbanized residence.
+
+#### Better visualization with maps
+
+For a better visualization as to where the populations are more dense across the countries, it is easier to visualize them across a map.
+
+```{r fig.width=30, message=FALSE, warning=FALSE}
+# Create population map
+world_map_data <- map_data("world")
+
+# Create the population map plot with world map background
+population_map_plot <- ggplot() +
+  geom_map(data = world_map_data, map = world_map_data,
+           aes(x = long, y = lat, map_id = region), color = "black", fill = "white") +
+  geom_point(data = highest_data, aes(x = longitude, y = latitude, size = population, fill = population),
+             shape = 21, color = "black", alpha = 0.7, show.legend = TRUE) +  # Set alpha to adjust transparency
+  scale_fill_gradient(low = "lightcoral", high = "darkred", na.value = "transparent", guide = "colorbar") +
+  scale_size_continuous(range = c(5, 30), guide = FALSE) +  # Remove size legend
+  labs(title = "Population Distribution Map",
+       x = "Longitude",
+       y = "Latitude",
+       fill = "Population") +
+  graph_theme +
+  theme(plot.title = element_text(color = "darkred", size = 30, face = "bold")) +
+  theme(axis.title = element_text(color = "#202020", size = 26)) +
+  theme(legend.position = "bottom")  # Move the legend to the bottom
+grid.arrange(population_map_plot, ncol = 1)
+```
+
+With this, we can clearly see that China and India has the most densely population compared to the other parts of the world.
+
+### Analyzing correlation between uploads and ranking
+
+To begin, we first have to calculate the ranking of each youtuber specific to their country. This means that their percentile is determined based off their countries data rather than globally as a whole.
+
+```{r, message=FALSE, warning=FALSE}
+youtube_data <- youtube_data %>%
+  group_by(country) %>%
+  mutate(
+    country_total_ranks = n(),
+    country_percentile_rank = (rank(rank) - 1) / (country_total_ranks - 1)
+  ) %>%
+  ungroup() %>%
+  mutate(country_percentile_rank = case_when(
+    country_percentile_rank <= 0.2 ~ "1-20%",
+    country_percentile_rank <= 0.4 ~ "21-40%",
+    country_percentile_rank <= 0.6 ~ "41-60%",
+    country_percentile_rank <= 0.8 ~ "61-80%",
+    TRUE ~ "81-100%"
+  ))
+```
+
+Once that is done, we can represent it in a plot where the Y axis shows the number of uploads and the X axis shows the ranking.
+
+```{r, fig.width = 12, message=FALSE, warning=FALSE}
+ggplot(youtube_data, aes(x = country_percentile_rank, y = uploads)) +
+      geom_point(colour = "darkred", shape = 23) +
+      geom_smooth() +
+      labs(
+        title = "Uploads vs Rank",
+        x = "Global Percentile Rank",
+        y = "Number of Uploads"
+      ) +
+      graph_theme
+```
+
+However, as we can see from this it is not a useful representation as each Youtuber is ranked based of their country rank rather than a global rank. Hence why we should use the Shiny Application for this to demonstrate each country's data and information.
+
+## Shiny Application
+
+### Youtube Link
+
+Here is the YouTube link explaining my Shiny implementation: <https://youtu.be/mzqJw1AdGJ0>
+
+##Implementation We will be using the Shiny app to primarily demonstrate data from each country's perspective.To achieve this we first have to setup our shiny app with some basic configurations.
+
+Firstly, the Shiny App library has to be installed and imported.
+
+```{r}
+install.packages("Shiny")
+library(shiny)
+```
+
+next we would then need to setup up the side panel with the plots avaiable as well as the countries and each plot's specific configuration.
+
+```{r, message=FALSE, warning=FALSE}
+# Define UI
+ui <- fluidPage(
+  titlePanel("Youtube Data Plot Selection"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      style = "max-height: calc(100vh - 50px); overflow-y: auto; width: 300px; position: fixed;",  # Adjusted width and added position
+      selectInput("plot_type", "Select Plot Type", choices = c("Channel Category Plot", "Rank Percentile Plot", "Earnings Plot")),
+      selectInput("country_chart", "Select Country", choices = unique(youtube_data$country)),
+      uiOutput("channel_type_ui"),
+      conditionalPanel(
+        condition = "input.plot_type == 'Rank Percentile Plot'",
+        checkboxInput("correlation_checkbox", "Show Video views vs rank Plot", value = FALSE)
+      ),
+      conditionalPanel(
+        condition = "input.plot_type == 'Earnings Plot'",
+        radioButtons("earnings_time_period", "Select Earnings Time Period",
+                     choices = c("Monthly", "Yearly"), selected = "Monthly"),
+        radioButtons("earnings_value_type", "Select Earnings Value Type",
+                     choices = c("Highest", "Lowest"), selected = "Highest")
+      ),
+      
+      hr()
+    ),
+    mainPanel(
+      style = "margin-left: 350px;",  # Adjusted margin-left
+      uiOutput("dynamic_plot"),
+      verbatimTextOutput("total_youtubers_count")
+    )
+  )
+)
+```
+
+Note that I have chosen to include total youtuber count in as well just so that we can better understand how many youtubers were used to achieve the numbers on the plots
+
+after which we then have to configure the server with the relevant conditions for each specific plot selected from the UI
+
+```{r, message=FALSE, warning=FALSE}
+server <- function(input, output, session) {
+  
+  total_youtubers_count <- reactiveVal(0)  # Initialize with 0
+  
+  observe({
+    if (!is.null(input$country_chart)) {
+      total_youtubers_count(nrow(filtered_data_chart()))
+    }
+  })
+  
+  output$total_youtubers_count <- renderText({
+    paste("Total YouTubers in", input$country_chart, "used for this plot:", total_youtubers_count())
+  })
+  
+  output$channel_type_ui <- renderUI({
+    if (input$plot_type == "Channel Category Plot") {
+      selectInput("channel_type", "Select Channel Type", choices = c("All", unique(youtube_data$channel_type)))
+    } else {
+      NULL
+    }
+  })
+  
+  filtered_data_chart <- reactive({
+    if (!is.null(input$channel_type) && input$channel_type != "All") {
+      filtered_data <- youtube_data[youtube_data$country == input$country_chart &
+                                      youtube_data$channel_type == input$channel_type, ]
+    } else {
+      filtered_data <- youtube_data[youtube_data$country == input$country_chart, ]
+    }
+    filtered_data
+  })
+  
+  output$dynamic_plot <- renderUI({
+    plot_type <- input$plot_type
+    
+    if (plot_type == "Channel Category Plot") {
+      plotOutput("stacked_bar_chart")
+    } else if (plot_type == "Rank Percentile Plot") {
+      plotOutput("percentile_scatter_plot")
+    } else if (plot_type == "Earnings Plot") {
+      plotOutput("earning_plot")
+    }
+  })
+```
+
+### Analyzing data for Channel Category types
+
+in this plot, the main objective is to visualize the number of uploads from each category. Ontop of that, out of all that uploads what are their channel types. Since we have 3 different variables here, the best representation of this is to use a stacked coloured bar chart.
+
+```{r, message=FALSE, warning=FALSE}
+output$stacked_bar_chart <- renderPlot({
+    data_for_plot <- filtered_data_chart()  # Store the reactive data in a variable
+    ggplot(data_for_plot, aes(x = category, y = uploads, fill = channel_type)) +
+      geom_bar(stat = "identity") +
+      labs(title = "Country Channel Type Category Data",
+           x = "Category",
+           y = "Uploads",
+           fill = "Channel Type") +
+      graph_theme +
+      coord_flip() +
+      theme(legend.position = "bottom",
+            text = element_text(face = "bold"),  # Bold text
+            plot.title = element_text(size = rel(1.2))) +
+      scale_fill_discrete(name = "Channel Type")
+  })
+```
+
+An included option is to allow you to select channel type, this further drills down the data and allows you to see for that specific channel type what categories do they exist in.
+
+### Analyzing data for Youtuber rank based on uploads vs video views
+
+in this plot, we want to see if the total number of uploads affects the Ranking percentile of the youtubers from that specific country. To achieve this, we first have to assign each youtuber a percentile ranking based on their country rank. Remember from the previous part that this was already done during the data transformation.
+
+```{r, message=FALSE, warning=FALSE}
+  output$percentile_scatter_plot <- renderPlot({
+    data_for_plot <- filtered_data_chart()  # Store the reactive data in a variable
+    p <- ggplot(data_for_plot, aes(x = country_percentile_rank, y = uploads)) +
+      geom_point(colour = "darkred", shape = 23) +
+      labs(title = "Country Rank Data",
+           x = "Top Percentile Rank",
+           y = "Uploads") +
+      theme(legend.position = "bottom",
+            text = element_text(face = "bold", size = 12),  # Bold text
+            plot.title = element_text(size = rel(1.2))) +
+      graph_theme
+```
+
+as we can see from this there is somewhat of a relationship with a high number of uploads to however it is not a clear correlation.
+
+lets try to demonstrate it now with video views rather than uploads
+
+```{r, message=FALSE, warning=FALSE}
+ if (input$correlation_checkbox) {
+      correlation_plot <- ggplot(data_for_plot, aes(x = video_views, y = country_percentile_rank)) +
+        geom_point(colour = "darkblue", shape = 23) +
+        geom_smooth(method = "lm", se = FALSE, color = "darkblue") +
+        labs(title = "Correlation between Video Views and Percentile Rank",
+             x = "Video Views",
+             y = "Percentile Rank") +
+        theme(legend.position = "bottom",
+              text = element_text(face = "bold", size = 12),  # Bold text
+              plot.title = element_text(size = rel(1.2))) +
+        graph_theme
+      p <- cowplot::plot_grid(p, correlation_plot, nrow = 2)
+    }
+```
+
+this clearly shows that the ranking of each youtuber is directly correlated to the number of video views that they have.
+
+### Analyzing earnings of each countries youtubers
+
+For this plot, we are trying to represent the data in a box plot to show the spread of earnings for both yearly/monthly as well as if they were the lowest or the highest. However due to the data being heavily skewed towards one side, the box plot for certain countries may not be a clear representation.
+
+to counter this, I have also included a violin plot to better represent the data and show where the majority of the spread is.
+
+```{r, message=FALSE, warning=FALSE}
+  output$earning_plot <- renderPlot({
+    data_for_plot <- filtered_data_chart()
+    
+    earnings_type <- if (input$earnings_time_period == "Monthly") {
+      if (input$earnings_value_type == "Highest") {
+        "highest_monthly_earnings"
+      } else {
+        "lowest_monthly_earnings"
+      }
+    } else {
+      if (input$earnings_value_type == "Highest") {
+        "highest_yearly_earnings"
+      } else {
+        "lowest_yearly_earnings"
+      }
+    }
+    
+    if (earnings_type %in% names(data_for_plot)) {
+      mean_earnings <- mean(data_for_plot[[earnings_type]], na.rm = TRUE)
+      p_box <- ggplot(data_for_plot, aes(x = factor(1), y = .data[[earnings_type]])) +
+        geom_boxplot() +
+        stat_summary(fun = mean, geom = "point", shape = 19, size = 3, color = "red") +  # Adding mean dot
+        geom_text(aes(x = 1, y = mean_earnings, label = paste("Mean")),
+                  vjust = -1, color = "red") +
+        labs(title = paste(mean_earnings, input$earnings_value_type, "Earnings Box Plot -", input$earnings_time_period, mean_earnings),
+             x = "",
+             y = "Earnings") +
+        theme(legend.position = "bottom",
+              text = element_text(face = "bold", size = 12),  # Bold text
+              plot.title = element_text(size = rel(1.2))) +
+        graph_theme +
+        scale_x_discrete(labels = "")
+      
+      p_violin <- ggplot(data_for_plot, aes(x = factor(1), y = .data[[earnings_type]])) +
+        geom_violin(fill = "lightblue", color = "blue", alpha = 0.5) +
+        stat_summary(fun = mean, geom = "point", shape = 19, size = 3, color = "red") +  # Adding mean dot
+        geom_text(aes(x = 1, y = mean_earnings, label = paste("Mean")),
+                  vjust = -1, color = "red") +
+        labs(title = paste(input$earnings_value_type, "Earnings Violin Plot -", input$earnings_time_period),
+             x = "",
+             y = "Earnings") +
+        theme(legend.position = "bottom",
+              text = element_text(face = "bold", size = 12),  # Bold text
+              plot.title = element_text(size = rel(1.2))) +
+        graph_theme +
+        scale_x_discrete(labels = "")
+      
+      plot_grid(p_box, p_violin, ncol = 2)
+    } else {
+      # Return a message if the selected earnings column is not present
+      plot(NULL, xlim = c(0, 1), ylim = c(0, 1), xlab = "", ylab = "",
+           main = "Selected earnings column not found.")
+    }
+  })
+```
+
+With the combination of using both a box and violin chart. we have a clear visualization now of where the majority of earnings are congregating and also where the average earnings are typically located for each country.
